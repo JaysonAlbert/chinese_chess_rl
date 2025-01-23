@@ -1,0 +1,7 @@
+torch
+numpy
+pygame
+tqdm==4.65.0
+pandas==1.5.3
+transformers==4.36.0
+requests
