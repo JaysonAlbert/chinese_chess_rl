@@ -12,6 +12,18 @@
     "end": 7
   },
   {
+    "piece": "马",
+    "start": 2,
+    "movement": "forward",
+    "end": 3
+  },
+  {
+    "piece": "車",
+    "start": 9,
+    "movement": "horizontal",
+    "end": 8
+  },
+  {
     "piece": "兵",
     "start": 7,
     "movement": "forward",
@@ -25,6 +37,18 @@
   },
   {
     "piece": "马",
+    "start": 8,
+    "movement": "forward",
+    "end": 7
+  },
+  {
+    "piece": "砲",
+    "start": 8,
+    "movement": "horizontal",
+    "end": 9
+  },
+  {
+    "piece": "马",
     "start": 7,
     "movement": "forward",
     "end": 6
@@ -32,6 +56,18 @@
   {
     "piece": "相",
     "start": 3,
+    "movement": "forward",
+    "end": 5
+  },
+  {
+    "piece": "车",
+    "start": 1,
+    "movement": "forward",
+    "end": 1
+  },
+  {
+    "piece": "仕",
+    "start": 4,
     "movement": "forward",
     "end": 5
   },
@@ -49,6 +85,18 @@
   },
   {
     "piece": "兵",
+    "start": 9,
+    "movement": "forward",
+    "end": 1
+  },
+  {
+    "piece": "卒",
+    "start": 3,
+    "movement": "forward",
+    "end": 1
+  },
+  {
+    "piece": "兵",
     "start": 7,
     "movement": "forward",
     "end": 1
@@ -60,6 +108,18 @@
     "end": 4
   },
   {
+    "piece": "马",
+    "start": 6,
+    "movement": "forward",
+    "end": 7
+  },
+  {
+    "piece": "相",
+    "start": 5,
+    "movement": "forward",
+    "end": 3
+  },
+  {
     "piece": "兵",
     "start": 9,
     "movement": "forward",
@@ -68,6 +128,18 @@
   {
     "piece": "車",
     "start": 8,
+    "movement": "forward",
+    "end": 5
+  },
+  {
+    "piece": "炮",
+    "start": 8,
+    "movement": "horizontal",
+    "end": 5
+  },
+  {
+    "piece": "砲",
+    "start": 2,
     "movement": "forward",
     "end": 5
   },
@@ -85,6 +157,18 @@
   },
   {
     "piece": "车",
+    "start": 1,
+    "movement": "horizontal",
+    "end": 3
+  },
+  {
+    "piece": "馬",
+    "start": 7,
+    "movement": "forward",
+    "end": 6
+  },
+  {
+    "piece": "车",
     "start": 9,
     "movement": "horizontal",
     "end": 8
@@ -94,6 +178,18 @@
     "start": 2,
     "movement": "horizontal",
     "end": 7
+  },
+  {
+    "piece": "兵",
+    "start": 9,
+    "movement": "forward",
+    "end": 1
+  },
+  {
+    "piece": "馬",
+    "start": 6,
+    "movement": "forward",
+    "end": 5
   },
   {
     "piece": "车",
@@ -106,6 +202,18 @@
     "start": 1,
     "movement": "backward",
     "end": 2
+  },
+  {
+    "piece": "仕",
+    "start": 6,
+    "movement": "forward",
+    "end": 5
+  },
+  {
+    "piece": "卒",
+    "start": 5,
+    "movement": "forward",
+    "end": 1
   },
   {
     "piece": "炮",
@@ -120,6 +228,18 @@
     "end": 5
   },
   {
+    "piece": "炮",
+    "start": 5,
+    "movement": "forward",
+    "end": 3
+  },
+  {
+    "piece": "相",
+    "start": 3,
+    "movement": "backward",
+    "end": 5
+  },
+  {
     "piece": "车",
     "start": 8,
     "movement": "forward",
@@ -132,6 +252,18 @@
     "end": 2
   },
   {
+    "piece": "车",
+    "start": 3,
+    "movement": "backward",
+    "end": 1
+  },
+  {
+    "piece": "車",
+    "start": 8,
+    "movement": "horizontal",
+    "end": 3
+  },
+  {
     "piece": "相",
     "start": 7,
     "movement": "forward",
@@ -145,6 +277,18 @@
   },
   {
     "piece": "相",
+    "start": 5,
+    "movement": "backward",
+    "end": 7
+  },
+  {
+    "piece": "車",
+    "start": 1,
+    "movement": "horizontal",
+    "end": 3
+  },
+  {
+    "piece": "相",
     "start": 7,
     "movement": "forward",
     "end": 5
@@ -154,6 +298,18 @@
     "start": 3,
     "movement": "horizontal",
     "end": 1
+  },
+  {
+    "piece": "相",
+    "start": 5,
+    "movement": "backward",
+    "end": 7
+  },
+  {
+    "piece": "帥",
+    "start": 5,
+    "movement": "horizontal",
+    "end": 6
   },
   {
     "piece": "车",
@@ -169,6 +325,18 @@
   },
   {
     "piece": "车",
+    "start": 8,
+    "movement": "horizontal",
+    "end": 7
+  },
+  {
+    "piece": "車",
+    "start": 4,
+    "movement": "horizontal",
+    "end": 3
+  },
+  {
+    "piece": "车",
     "start": 7,
     "movement": "forward",
     "end": 1
@@ -177,6 +345,18 @@
     "piece": "相",
     "start": 5,
     "movement": "backward",
+    "end": 3
+  },
+  {
+    "piece": "车",
+    "start": 2,
+    "movement": "forward",
+    "end": 6
+  },
+  {
+    "piece": "車",
+    "start": 1,
+    "movement": "horizontal",
     "end": 3
   },
   {
@@ -193,6 +373,18 @@
   },
   {
     "piece": "车",
+    "start": 2,
+    "movement": "horizontal",
+    "end": 4
+  },
+  {
+    "piece": "帥",
+    "start": 6,
+    "movement": "horizontal",
+    "end": 5
+  },
+  {
+    "piece": "车",
     "start": 4,
     "movement": "horizontal",
     "end": 8
@@ -202,6 +394,18 @@
     "start": 1,
     "movement": "horizontal",
     "end": 3
+  },
+  {
+    "piece": "仕",
+    "start": 4,
+    "movement": "forward",
+    "end": 5
+  },
+  {
+    "piece": "車",
+    "start": 3,
+    "movement": "backward",
+    "end": 5
   },
   {
     "piece": "炮",
@@ -214,5 +418,17 @@
     "start": 5,
     "movement": "backward",
     "end": 3
+  },
+  {
+    "piece": "车",
+    "start": 8,
+    "movement": "forward",
+    "end": 2
+  },
+  {
+    "piece": "車",
+    "start": 3,
+    "movement": "horizontal",
+    "end": 5
   }
 ]

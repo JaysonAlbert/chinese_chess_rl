@@ -44,11 +44,11 @@ class ChineseNotationParser:
         }
 
         # Piece mappings for red and black
-        self.red_pieces = {
+        self.black_pieces = {
             "车": "车", "马": "马", "象": "象", "士": "士",
             "将": "将", "炮": "炮", "兵": "兵"
         }
-        self.black_pieces = {
+        self.red_pieces = {
             "车": "車", "马": "馬", "象": "相", "士": "仕",
             "将": "帥", "炮": "砲", "兵": "卒"
         }
@@ -59,15 +59,17 @@ class ChineseNotationParser:
         lines = game_text.strip().split('\n')
         
         for line in lines:
-            # Remove move numbers and spaces
-            line = re.sub(r'^\s*\d+\.', '', line).strip()
-            
             # Split into red and black moves
             parts = line.split()
-            if len(parts) >= 2:
-                moves.append(self.parse_move(parts[0], is_red=True))   # Red move
-                moves.append(self.parse_move(parts[1], is_red=False))  # Black move
-        
+            if len(parts) >= 4:  # Check for 4 moves (2 red, 2 black)
+                # Remove move numbers and spaces
+                # Remove move numbers and clean each part
+                parts = [re.sub(r'^\s*\d+\.', '', part).strip() for part in parts]
+                
+                moves.append(self.parse_move(parts[0], is_red=True))   # First red move
+                moves.append(self.parse_move(parts[1], is_red=False))  # First black move
+                moves.append(self.parse_move(parts[2], is_red=True))   # Second red move 
+                moves.append(self.parse_move(parts[3], is_red=False))  # Second black move
         return moves
 
     def parse_move(self, move_str, is_red):

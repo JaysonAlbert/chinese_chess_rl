@@ -21,22 +21,60 @@ class Horse(Piece):
     def __init__(self, is_red):
         super().__init__('h', is_red)
     
+    def calculate_destination(self, pos, movement, destination):
+        """Calculate horse's destination based on movement"""
+        row, col = pos
+        dest = int(destination)
+        # Convert target column based on perspective
+        target_col = (9 - dest) if self.is_red else (dest - 1)
+        # Calculate row change based on movement direction
+        if movement == "forward":
+            # Move forward (up for red, down for black)
+            row_change = -1 if self.is_red else 1
+        elif movement == "backward":
+            # Move backward (down for red, up for black)
+            row_change = 1 if self.is_red else -1
+        else:
+            return None
+            
+        # Double the row change if col_change is 1 (马走日)
+        if abs(target_col - col) == 1:
+            row_change *= 2
+        # Calculate possible destinations based on target column
+        col_change = target_col - col
+        
+        # Check if the move is valid (马走日)
+        if abs(row_change) == 2 and abs(col_change) == 1:
+            return (row + row_change, target_col)
+        elif abs(row_change) == 1 and abs(col_change) == 2:
+            return (row + row_change, target_col)
+            
+        return None
+
     def get_moves(self, pos, board):
+        """Get all valid moves for the horse"""
         row, col = pos
         moves = []
         # Horse's L-shaped moves: 2 steps orthogonally then 1 step diagonally
         horse_moves = [
-            (-2, -1), (-2, 1), (2, -1), (2, 1),
-            (-1, -2), (-1, 2), (1, -2), (1, 2)
+            (-2, -1), (-2, 1),  # Forward 2, left/right 1
+            (2, -1), (2, 1),    # Backward 2, left/right 1
+            (-1, -2), (-1, 2),  # Forward 1, left/right 2
+            (1, -2), (1, 2)     # Backward 1, left/right 2
         ]
         
         for dr, dc in horse_moves:
             new_row, new_col = row + dr, col + dc
             if self._is_valid_pos((new_row, new_col), board):
                 # Check for blocking piece (马腿)
-                block_row = row + (dr // 2)
-                block_col = col + (dc // 2)
-                if not board[block_row][block_col]:
+                if abs(dr) == 2:  # Moving vertically first
+                    block_row = row + (dr // 2)
+                    block_col = col
+                else:  # Moving horizontally first
+                    block_row = row
+                    block_col = col + (dc // 2)
+                
+                if not board[block_row][block_col]:  # No blocking piece
                     target = board[new_row][new_col]
                     if not target or target.is_red != self.is_red:
                         moves.append(((row, col), (new_row, new_col)))
@@ -45,23 +83,6 @@ class Horse(Piece):
     def _is_valid_pos(self, pos, board):
         row, col = pos
         return 0 <= row < 10 and 0 <= col < 9
-
-    def calculate_destination(self, pos, movement, destination):
-        """Calculate horse's destination based on movement"""
-        row, col = pos
-        dest = int(destination)
-        # Convert target column based on perspective
-        target_col = (9 - dest) if self.is_red else (dest - 1)
-        
-        if movement == "forward":
-            # Move forward 2 (up for red, down for black)
-            new_row = row + (2 if self.is_red else -2)
-            return (new_row, target_col)
-        elif movement == "backward":
-            # Move backward 2 (down for red, up for black) 
-            new_row = row + (-2 if self.is_red else 2)
-            return (new_row, target_col)
-        return None
 
 class Rook(Piece):
     def __init__(self, is_red):
@@ -161,7 +182,7 @@ class Elephant(Piece):
             new_row, new_col = row + dr, col + dc
             if 0 <= new_row < 10 and 0 <= new_col < 9:
                 # Check if elephant stays on its side
-                if self.is_red and new_row <= 4 or not self.is_red and new_row >= 5:
+                if self.is_red and new_row >= 5 or not self.is_red and new_row <= 4:
                     # Check blocking piece
                     block_row = row + (dr // 2)
                     block_col = col + (dc // 2)
@@ -191,36 +212,65 @@ class Advisor(Piece):
     def __init__(self, is_red):
         super().__init__('a', is_red)
     
-    def get_moves(self, pos, board):
-        row, col = pos
-        moves = []
-        moves_delta = [(-1, -1), (-1, 1), (1, -1), (1, 1)]
-        for dr, dc in moves_delta:
-            new_row, new_col = row + dr, col + dc
-            if 0 <= new_row < 10 and 0 <= new_col < 9:
-                # Check if move is within palace
-                if self.is_red and 0 <= new_row <= 2 and 3 <= new_col <= 5 or \
-                   not self.is_red and 7 <= new_row <= 9 and 3 <= new_col <= 5:
-                    target = board[new_row][new_col]
-                    if not target or target.is_red != self.is_red:
-                        moves.append(((row, col), (new_row, new_col)))
-        return moves
-
     def calculate_destination(self, pos, movement, destination):
+        """Calculate advisor's destination based on movement"""
         row, col = pos
         dest = int(destination)
         
+        # Convert target column based on perspective
+        target_col = (9 - dest) if self.is_red else (dest - 1)
+        
+        # Calculate row change based on movement direction
         if movement == "forward":
-            # Move diagonally forward
-            new_row = row + (-1 if self.is_red else 1)
-            new_col = (9 - dest) if self.is_red else (dest - 1)
-            return (new_row, new_col)
+            # Move forward diagonally (up for red, down for black)
+            row_change = -1 if self.is_red else 1
         elif movement == "backward":
-            # Move diagonally backward
-            new_row = row + (1 if self.is_red else -1)
-            new_col = (9 - dest) if self.is_red else (dest - 1)
-            return (new_row, new_col)
+            # Move backward diagonally (down for red, up for black)
+            row_change = 1 if self.is_red else -1
+        else:
+            return None
+        
+        # Calculate new position
+        new_row = row + row_change
+        
+        # Advisor must move diagonally one step
+        # The target column must be adjacent to current column
+        if abs(target_col - col) == 1:
+            new_pos = (new_row, target_col)
+            # Verify the move is within palace
+            if self._is_in_palace(new_pos):
+                return new_pos
+        
         return None
+
+    def get_moves(self, pos, board):
+        """Get all valid moves for the advisor"""
+        row, col = pos
+        moves = []
+        # Advisor moves diagonally within palace
+        moves_delta = [(-1, -1), (-1, 1), (1, -1), (1, 1)]
+        
+        for dr, dc in moves_delta:
+            new_row, new_col = row + dr, col + dc
+            if self._is_valid_pos((new_row, new_col), board) and \
+               self._is_in_palace((new_row, new_col)):
+                target = board[new_row][new_col]
+                if not target or target.is_red != self.is_red:
+                    moves.append(((row, col), (new_row, new_col)))
+        return moves
+
+    def _is_valid_pos(self, pos, board):
+        """Check if position is within board"""
+        row, col = pos
+        return 0 <= row < 10 and 0 <= col < 9
+
+    def _is_in_palace(self, pos):
+        """Check if position is within the palace"""
+        row, col = pos
+        if self.is_red:
+            return 7 <= row <= 9 and 3 <= col <= 5
+        else:
+            return 0 <= row <= 2 and 3 <= col <= 5
 
 class General(Piece):
     def __init__(self, is_red):
@@ -229,34 +279,53 @@ class General(Piece):
     def get_moves(self, pos, board):
         row, col = pos
         moves = []
-        directions = [(0, 1), (0, -1), (1, 0), (-1, 0)]
+        directions = [(0, 1), (0, -1), (1, 0), (-1, 0)]  # 上下左右
         for dr, dc in directions:
             new_row, new_col = row + dr, col + dc
-            if 0 <= new_row < 10 and 0 <= new_col < 9:
-                # Check if move is within palace
-                if self.is_red and 0 <= new_row <= 2 and 3 <= new_col <= 5 or \
-                   not self.is_red and 7 <= new_row <= 9 and 3 <= new_col <= 5:
-                    target = board[new_row][new_col]
-                    if not target or target.is_red != self.is_red:
-                        moves.append(((row, col), (new_row, new_col)))
+            if self._is_valid_pos((new_row, new_col), board) and \
+               self._is_in_palace((new_row, new_col)):
+                target = board[new_row][new_col]
+                if not target or target.is_red != self.is_red:
+                    moves.append(((row, col), (new_row, new_col)))
         return moves
 
     def calculate_destination(self, pos, movement, destination):
+        """Calculate general's destination based on movement"""
         row, col = pos
         dest = int(destination)
         
+        # Convert target column based on perspective
+        target_col = (9 - dest) if self.is_red else (dest - 1)
+        
+        # Calculate new position based on movement type
         if movement == "horizontal":
-            # Move horizontally to target column
-            new_col = (9 - dest) if self.is_red else (dest - 1)
-            return (row, new_col)
-        elif movement in ["forward", "backward"]:
-            # Move vertically by 1 step
-            if movement == "forward":
-                new_row = row + (-1 if self.is_red else 1)
-            else:  # backward
-                new_row = row + (1 if self.is_red else -1)
-            return (new_row, col)
+            new_pos = (row, target_col)
+        elif movement == "forward":
+            new_row = row + (-1 if self.is_red else 1)
+            new_pos = (new_row, col)
+        elif movement == "backward":
+            new_row = row + (1 if self.is_red else -1)
+            new_pos = (new_row, col)
+        else:
+            return None
+            
+        # Verify the move is within palace
+        if self._is_in_palace(new_pos):
+            return new_pos
         return None
+
+    def _is_valid_pos(self, pos, board):
+        """Check if position is within board"""
+        row, col = pos
+        return 0 <= row < 10 and 0 <= col < 9
+
+    def _is_in_palace(self, pos):
+        """Check if position is within the palace"""
+        row, col = pos
+        if self.is_red:
+            return 7 <= row <= 9 and 3 <= col <= 5
+        else:
+            return 0 <= row <= 2 and 3 <= col <= 5
 
 class Pawn(Piece):
     def __init__(self, is_red):
@@ -266,7 +335,7 @@ class Pawn(Piece):
         row, col = pos
         moves = []
         # Direction depends on color
-        forward = 1 if self.is_red else -1
+        forward = -1 if self.is_red else 1
         
         # Forward move
         new_row = row + forward
@@ -422,12 +491,17 @@ class XiangqiEnv:
         from_row, from_col = from_pos
         to_row, to_col = to_pos
         
-        # Check if move is valid
-        if action not in self.get_valid_moves():
+        # Get piece and check if it belongs to current player
+        piece = self.board[from_row][from_col]
+        if not piece or piece.is_red != self.current_player:
+            return self._get_state(), -1, True
+            
+        # Check if move is valid for this piece
+        valid_moves = piece.get_moves(from_pos, self.board)
+        if action not in valid_moves:
             return self._get_state(), -1, True
         
         # Move the piece
-        piece = self.board[from_row][from_col]
         self.board[to_row][to_col] = piece
         self.board[from_row][from_col] = None
         
@@ -440,24 +514,21 @@ class XiangqiEnv:
         
         return self._get_state(), reward, done
 
-    def calculate_move(self, move):
-        """Convert Chinese notation move to board positions"""
+    def calculate_move(self, move, is_red):
+        """Convert Chinese notation move to board positions
+        Args:
+            move: The move in Chinese notation
+            is_red: True if it's red's turn, False if it's black's turn
+        """
         piece = move['piece']
         movement = move['movement']
         end = move['end']
-        # Check if it's a red piece using the traditional characters
-        is_red = piece in "车马象士将炮兵"  # Red uses simplified Chinese
-        is_black = piece in "車馬相仕帥砲卒"  # Black uses traditional Chinese
         
-        if not (is_red or is_black):
-            print(f"Warning: Unknown piece character: {piece}")
-            return None, None
-
         # Get start position
         if 'position_marker' in move:
-            from_pos = self._find_piece_by_marker(piece, move['position_marker'])
+            from_pos = self._find_piece_by_marker(piece, move['position_marker'], is_red)
         else:
-            from_pos = self._find_piece_by_column(piece, move['start'])
+            from_pos = self._find_piece_by_column(piece, move['start'], is_red)
 
         # Get end position
         if not from_pos:
@@ -466,18 +537,16 @@ class XiangqiEnv:
         to_pos = self._calculate_destination(from_pos, piece, movement, end)
         return from_pos, to_pos
 
-    def _find_piece_by_marker(self, piece, marker):
+    def _find_piece_by_marker(self, piece, marker, is_red):
         """Find piece position using front/back marker"""
         pieces_pos = []
         piece_type = self._piece_to_type(piece)
-        is_red = piece in "车马象士将炮兵"
 
         for i in range(10):
             for j in range(9):
                 current_piece = self.board[i][j]
                 if current_piece and current_piece.piece_type == piece_type:
-                    if (current_piece.is_red and is_red) or \
-                       (not current_piece.is_red and not is_red):
+                    if current_piece.is_red == is_red:
                         pieces_pos.append((i, j))
 
         if not pieces_pos:
@@ -485,16 +554,14 @@ class XiangqiEnv:
 
         # Sort based on the marker
         if marker == "front":
-            pieces_pos.sort(key=lambda x: x[0], reverse=is_red)
-        elif marker == "back":
             pieces_pos.sort(key=lambda x: x[0], reverse=not is_red)
-
+        elif marker == "back":
+            pieces_pos.sort(key=lambda x: x[0], reverse=is_red)
         return pieces_pos[0]
 
-    def _find_piece_by_column(self, piece, col):
+    def _find_piece_by_column(self, piece, col, is_red):
         """Find piece position using column number"""
         piece_type = self._piece_to_type(piece)
-        is_red = piece in "车马象士将炮兵"  # Red uses simplified Chinese
         
         # Convert column number based on perspective
         col = (9 - int(col)) if is_red else (int(col) - 1)
@@ -510,8 +577,7 @@ class XiangqiEnv:
         for row in rows:
             current_piece = self.board[row][col]
             if current_piece and current_piece.piece_type == piece_type:
-                if (current_piece.is_red and is_red) or \
-                   (not current_piece.is_red and not is_red):
+                if current_piece.is_red == is_red:
                     return (row, col)
         return None
 

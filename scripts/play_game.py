@@ -1,5 +1,6 @@
 import sys
 import os
+import platform
 # Add project root directory to Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -32,15 +33,25 @@ class ChessVisualizer:
         self.load_pieces()
         
         # Font for UI elements
-        self.font = pygame.font.SysFont("wenquanyimicrohei", 36)
-        self.number_font = pygame.font.SysFont("wenquanyimicrohei", 24)  # Smaller font for numbers
-        self.river_font = pygame.font.SysFont("wenquanyimicrohei", 40)  # Larger font for river text
+        self.font = pygame.font.SysFont(get_system_font(), 36)
+        self.number_font = pygame.font.SysFont(get_system_font(), 24)  # Smaller font for numbers
+        self.river_font = pygame.font.SysFont(get_system_font(), 40)  # Larger font for river text
         
         # Add Chinese number mapping
         self.chinese_numbers = {
             1: "一", 2: "二", 3: "三", 4: "四", 5: "五",
             6: "六", 7: "七", 8: "八", 9: "九"
         }
+        
+        # 添加新的颜色定义
+        self.HIGHLIGHT_FROM = (0, 255, 0, 128)  # 起点高亮（半透明绿色）
+        self.HIGHLIGHT_TO = (255, 255, 0, 128)  # 终点高亮（半透明黄色）
+        self.MOVE_LINE = (0, 150, 255)  # 移动轨迹线（蓝色）
+        
+        # 动画相关属性
+        self.last_move = None  # 存储最后一步移动
+        self.move_start_time = 0  # 移动开始时间
+        self.MOVE_DURATION = 500  # 移动动画持续时间（毫秒）
     
     def load_pieces(self):
         """Load piece images from the assets directory"""
@@ -99,10 +110,27 @@ class ChessVisualizer:
         # Draw piece symbol
         color = self.RED if is_red else self.BLACK
         symbol = red_pieces[piece_type] if is_red else black_pieces[piece_type]
-        font = pygame.font.SysFont("wenquanyimicrohei", size//2)
-        text = font.render(symbol, True, color)
-        text_rect = text.get_rect(center=(size//2, size//2))
-        surface.blit(text, text_rect)
+        
+        # 使用系统中文字体
+        font_name = get_system_font()
+        if not font_name:  # 如果没有找到合适的字体，打印警告
+            print("Warning: No suitable Chinese font found. Pieces may not display correctly.")
+        
+        # 对于棋子文字，我们使用稍大一点的字号以确保清晰可见
+        font = pygame.font.SysFont(font_name, int(size * 0.7))  # 增大字号到原来的0.7倍
+        
+        try:
+            text = font.render(symbol, True, color)
+            text_rect = text.get_rect(center=(size//2, size//2))
+            surface.blit(text, text_rect)
+        except pygame.error as e:
+            print(f"Error rendering piece text: {e}")
+            # 如果渲染失败，尝试使用备用字符
+            fallback_symbols = {'r': 'R', 'h': 'H', 'e': 'E', 'a': 'A', 
+                              'k': 'K', 'c': 'C', 'p': 'P'}
+            fallback_text = font.render(fallback_symbols[piece_type], True, color)
+            fallback_rect = fallback_text.get_rect(center=(size//2, size//2))
+            surface.blit(fallback_text, fallback_rect)
         
         # Save the image
         pygame.image.save(surface, filepath)
@@ -209,37 +237,73 @@ class ChessVisualizer:
         text_rect = text.get_rect(center=(self.width//2, self.height - self.margin + 25))  # Position closer to bottom
         self.screen.blit(text, text_rect)
         
+        # 绘制最后一步移动的效果
+        if self.last_move:
+            from_pos, to_pos = self.last_move
+            current_time = pygame.time.get_ticks()
+            elapsed = current_time - self.move_start_time
+            
+            if elapsed < self.MOVE_DURATION:
+                # 绘制移动动画
+                progress = elapsed / self.MOVE_DURATION
+                self._draw_move_animation(from_pos, to_pos, progress)
+            else:
+                # 动画结束后显示静态效果
+                self._draw_move_effects(from_pos, to_pos)
+        
         pygame.display.flip()
 
-def load_chinese_game(json_file):
-    """Load and convert Chinese notation moves to engine format."""
-    with open(json_file, 'r', encoding='utf-8') as f:
-        moves = json.load(f)
-    
-    converted_moves = []
-    for move in moves:
-        # Convert the Chinese notation to engine format
-        # This will need to be adapted based on your engine's move format
-        converted_move = convert_chinese_to_engine_format(move)
-        converted_moves.append(converted_move)
-    
-    return converted_moves
+    def _draw_move_effects(self, from_pos, to_pos):
+        """绘制移动效果（起点、终点高亮和轨迹线）"""
+        from_row, from_col = from_pos
+        to_row, to_col = to_pos
+        
+        # 计算棋盘上的实际坐标
+        from_x = self.margin + from_col * self.square_size
+        from_y = self.margin + from_row * self.square_size
+        to_x = self.margin + to_col * self.square_size
+        to_y = self.margin + to_row * self.square_size
+        
+        # 绘制起点高亮
+        highlight = pygame.Surface((self.square_size - 10, self.square_size - 10), pygame.SRCALPHA)
+        highlight.fill(self.HIGHLIGHT_FROM)
+        highlight_rect = highlight.get_rect(center=(from_x, from_y))
+        self.screen.blit(highlight, highlight_rect)
+        
+        # 绘制终点高亮
+        highlight = pygame.Surface((self.square_size - 10, self.square_size - 10), pygame.SRCALPHA)
+        highlight.fill(self.HIGHLIGHT_TO)
+        highlight_rect = highlight.get_rect(center=(to_x, to_y))
+        self.screen.blit(highlight, highlight_rect)
+        
+        # 绘制移动轨迹线
+        pygame.draw.line(self.screen, self.MOVE_LINE, (from_x, from_y), (to_x, to_y), 2)
 
-def convert_chinese_to_engine_format(move):
-    """Convert a Chinese notation move to engine format."""
-    # This function needs to be implemented based on your engine's move format
-    # Example conversion:
-    piece = move['piece']
-    start = move['start']
-    movement = move['movement']
-    end = move['end']
-    
-    # Convert to your engine's coordinate system
-    # This is a placeholder - implement based on your engine's requirements
-    return {
-        'from': calculate_position(piece, start, movement, env),
-        'to': calculate_end_position(calculate_position(piece, start, movement, env), movement, end, env)
-    }
+    def _draw_move_animation(self, from_pos, to_pos, progress):
+        """绘制移动动画"""
+        from_row, from_col = from_pos
+        to_row, to_col = to_pos
+        
+        # 计算起点和终点的实际坐标
+        from_x = self.margin + from_col * self.square_size
+        from_y = self.margin + from_row * self.square_size
+        to_x = self.margin + to_col * self.square_size
+        to_y = self.margin + to_row * self.square_size
+        
+        # 计算当前位置
+        current_x = from_x + (to_x - from_x) * progress
+        current_y = from_y + (to_y - from_y) * progress
+        
+        # 绘制移动轨迹
+        pygame.draw.line(self.screen, self.MOVE_LINE, (from_x, from_y), (to_x, to_y), 2)
+        
+        # 绘制起点和终点高亮
+        self._draw_move_effects(from_pos, to_pos)
+        
+        # 绘制移动中的棋子
+        piece = self.pieces_img[(self.last_piece_type, self.last_piece_is_red)]
+        piece_rect = piece.get_rect(center=(current_x, current_y))
+        self.screen.blit(piece, piece_rect)
 
 def play_game():
     env = XiangqiEnv()
@@ -317,8 +381,7 @@ def play_recorded_game(game_file):
                     move_index = 0
                     last_move_time = current_time
         
-        # Play the next move if available
-        if move_index < len(recorded_moves) and current_time - last_move_time >= 1000:
+        if move_index < len(recorded_moves):
             move = recorded_moves[move_index]
             is_red_move = (move_index % 2 == 0)
             print(f"\nProcessing move {move_index + 1}: {move} ({'Red' if is_red_move else 'Black'} to move)")
@@ -328,80 +391,82 @@ def play_recorded_game(game_file):
                 print(f"Warning: Expected {'Red' if is_red_move else 'Black'} to move")
                 env.current_player = is_red_move
             
-            # Calculate and make move
-            from_pos, to_pos = env.calculate_move(move)
+            # Calculate and make move using environment's logic
+            from_pos, to_pos = env.calculate_move(move, is_red_move)
             
             if from_pos and to_pos:
                 print(f"Making move from {from_pos} to {to_pos}")
-                if (from_pos, to_pos) in env.get_valid_moves():
-                    _, reward, done = env.step((from_pos, to_pos))
-                    print(f"Move made, reward: {reward}, done: {done}")
+                piece = env.board[from_pos[0]][from_pos[1]]
+                if piece:
+                    valid_moves = piece.get_moves(from_pos, env.board)
+                    if (from_pos, to_pos) in valid_moves:
+                        # 记录移动的棋子信息
+                        visualizer.last_piece_type = piece.piece_type
+                        visualizer.last_piece_is_red = piece.is_red
+                        
+                        # 设置移动动画
+                        visualizer.last_move = (from_pos, to_pos)
+                        visualizer.move_start_time = pygame.time.get_ticks()
+                        
+                        # 执行移动
+                        _, reward, done = env.step((from_pos, to_pos))
+                        print(f"Move made, reward: {reward}, done: {done}")
+                        move_index += 1
+                        last_move_time = current_time + visualizer.MOVE_DURATION  # 等待动画完成
+                        
+                        if done:
+                            winner = "红方" if reward > 0 else "黑方"
+                            print(f"游戏结束！{winner}获胜！")
+                            pygame.time.wait(3000)
+                            running = False
+                    else:
+                        # 打印错误信息和合法移动
+                        error_msg = [
+                            f"错误：第{move_index + 1}步移动不合法！",
+                            f"移动：{move}",
+                            f"位置：从{from_pos}到{to_pos}",
+                            "",
+                            "该棋子的所有合法移动："
+                        ]
+                        if valid_moves:
+                            for i, (_, valid_to) in enumerate(valid_moves, 1):
+                                error_msg.append(f"{i}. 到 {valid_to}")
+                        else:
+                            error_msg.append("该棋子当前没有合法移动！")
+                        
+                        print("\n".join(error_msg))
+                        
+                        # 等待用户按键继续
+                        waiting = True
+                        while waiting:
+                            for event in pygame.event.get():
+                                if event.type == pygame.QUIT:
+                                    waiting = False
+                                    running = False
+                                elif event.type == pygame.KEYDOWN:
+                                    if event.key in [pygame.K_ESCAPE, pygame.K_SPACE, pygame.K_RETURN]:
+                                        waiting = False
+                            pygame.time.wait(100)  # 减少CPU使用
+                        
+                        running = False
                 else:
-                    print("Move is not valid according to game rules")
+                    print(f"错误：第{move_index + 1}步起始位置没有棋子！")
+                    print(f"移动：{move}")
+                    print(f"位置：从{from_pos}到{to_pos}")
+                    pygame.time.wait(3000)
+                    running = False
             else:
-                print("Failed to calculate valid positions for this move")
-            
-            move_index += 1
-            last_move_time = current_time
+                print(f"错误：第{move_index + 1}步无法解析！")
+                print(f"移动：{move}")
+                print(f"位置：从{from_pos}到{to_pos}")
+                pygame.time.wait(3000)
+                running = False
         
-        # Update display
         visualizer.draw_board(env)
         pygame.display.flip()
         pygame.time.Clock().tick(60)
     
     pygame.quit()
-
-def calculate_position(piece, pos, movement, env):
-    """Calculate board position from Chinese notation"""
-    # Handle special position markers (前/后)
-    if isinstance(pos, dict) and 'position_marker' in pos:
-        # Find all pieces of this type
-        pieces_pos = []
-        for i in range(10):
-            for j in range(9):
-                current_piece = env.board[i][j]
-                if current_piece and current_piece.piece_type == piece_to_type(piece):
-                    if (current_piece.is_red and piece in "车马象士将炮兵") or \
-                       (not current_piece.is_red and piece in "車馬相仕帥砲卒"):
-                        pieces_pos.append((i, j))
-        
-        # Sort positions based on the marker
-        if pos['position_marker'] == 'front':
-            # For red pieces, "front" means larger row number (closer to black)
-            # For black pieces, "front" means smaller row number (closer to red)
-            is_red = piece in "车马象士将炮兵"
-            pieces_pos.sort(key=lambda x: x[0], reverse=is_red)
-            return pieces_pos[0] if pieces_pos else None
-        elif pos['position_marker'] == 'back':
-            is_red = piece in "车马象士将炮兵"
-            pieces_pos.sort(key=lambda x: x[0], reverse=not is_red)
-            return pieces_pos[0] if pieces_pos else None
-    else:
-        try:
-            is_red = piece in "车马象士将炮兵"
-            # Convert file number (1-9) to board column (0-8)
-            # For red pieces: count from right to left (9 - pos)
-            # For black pieces: count from left to right (pos - 1)
-            col = (9 - int(pos)) if is_red else (int(pos) - 1)
-            
-            piece_type = piece_to_type(piece)
-            # Search for the piece in the correct starting area
-            if is_red:
-                # Red pieces are at the bottom, search from bottom up
-                rows = range(9, -1, -1)
-            else:
-                # Black pieces are at the top, search from top down
-                rows = range(10)
-            
-            for row in rows:
-                current_piece = env.board[row][col]
-                if current_piece and current_piece.piece_type == piece_type:
-                    if (current_piece.is_red and is_red) or \
-                       (not current_piece.is_red and not is_red):
-                        return (row, col)
-        except (TypeError, ValueError) as e:
-            print(f"Error processing position {pos}: {e}")
-    return None
 
 def piece_to_type(piece):
     """Convert Chinese piece character to internal piece type"""
@@ -427,49 +492,108 @@ def calculate_end_position(from_pos, movement, destination, env):
         is_red = piece.is_red
         steps = int(destination) if not isinstance(destination, int) else destination
         
-        if piece.piece_type == 'h':  # Horse moves
-            if movement == "forward":
-                # Move forward 2, then 1 right/left
-                new_row = row + (-2 if is_red else 2)  # 2 steps forward
-                if steps == 7:  # forward-right
-                    new_col = col + 1
-                else:  # steps == 9, forward-left
-                    new_col = col - 1
-                return (new_row, new_col)
-            elif movement == "backward":
-                # Move backward 2, then 1 right/left
-                new_row = row + (2 if is_red else -2)  # 2 steps backward
-                if steps == 7:  # backward-right
-                    new_col = col + 1
-                else:  # steps == 9, backward-left
-                    new_col = col - 1
-                return (new_row, new_col)
+        # 使用 environment.py 中的移动逻辑
+        piece_type = piece.piece_type
+        valid_moves = env.get_piece_moves(row, col)
         
-        else:  # Normal piece movements
+        # 根据移动类型和目标位置找到匹配的移动
+        for move in valid_moves:
+            _, (target_row, target_col) = move
+            
             if movement == "horizontal":
-                # For horizontal moves, destination is the target column (1-9)
-                new_col = (9 - steps) if is_red else (steps - 1)
-                return (row, new_col)
-            
+                # 水平移动到指定列
+                # 红方：从右到左数（9-col），如"车二平五"中的5
+                # 黑方：从左到右数（col+1），如"车2平5"中的5
+                target_col_num = target_col + 1 if not is_red else 9 - target_col
+                if target_col_num == steps and target_row == row:
+                    return (target_row, target_col)
+                    
             elif movement == "forward":
-                # For forward moves, steps indicates number of squares to move
-                if is_red:
-                    new_row = row - steps
-                else:
-                    new_row = row + steps
-                return (new_row, col)
-            
+                # 前进指定步数
+                # 红方：向上移动（行号减小），如"兵七进一"
+                # 黑方：向下移动（行号增大），如"卒7进1"
+                steps_moved = abs(target_row - row)
+                if steps_moved == steps:
+                    # 确认移动方向正确
+                    if (is_red and target_row < row) or (not is_red and target_row > row):
+                        # 确认是直线移动
+                        if target_col == col:
+                            return (target_row, target_col)
+                            
             elif movement == "backward":
-                # For backward moves, steps indicates number of squares to move
-                if is_red:
-                    new_row = row + steps
-                else:
-                    new_row = row - steps
-                return (new_row, col)
-            
+                # 后退指定步数
+                # 红方：向下移动（行号增大），如"兵七退一"
+                # 黑方：向上移动（行号减小），如"卒7退1"
+                steps_moved = abs(target_row - row)
+                if steps_moved == steps:
+                    # 确认移动方向正确
+                    if (is_red and target_row > row) or (not is_red and target_row < row):
+                        # 确认是直线移动
+                        if target_col == col:
+                            return (target_row, target_col)
+                            
+            elif piece_type == 'h':  # 马的特殊移动
+                if movement == "forward":
+                    # 马前进
+                    # 红方：向上移动（行号减小），如"马二进三"
+                    # 黑方：向下移动（行号增大），如"马2进3"
+                    if ((is_red and target_row < row) or (not is_red and target_row > row)):
+                        col_diff = target_col - col
+                        # 7表示进右，9表示进左
+                        if (steps == 7 and col_diff == 1) or (steps == 9 and col_diff == -1):
+                            return (target_row, target_col)
+                elif movement == "backward":
+                    # 马后退
+                    # 红方：向下移动（行号增大），如"马二退三"
+                    # 黑方：向上移动（行号减小），如"马2退3"
+                    if ((is_red and target_row > row) or (not is_red and target_row < row)):
+                        col_diff = target_col - col
+                        # 7表示退右，9表示退左
+                        if (steps == 7 and col_diff == 1) or (steps == 9 and col_diff == -1):
+                            return (target_row, target_col)
+        
     except (TypeError, ValueError) as e:
         print(f"Error calculating end position: {e}")
     
+    return None
+
+def get_system_font():
+    system = platform.system()
+    if system == 'Windows':
+        fonts = [
+            'Microsoft YaHei',  # 微软雅黑
+            'SimHei',          # 中文黑体
+            'SimSun',          # 中文宋体
+            'KaiTi',           # 楷体
+            'NSimSun',         # 新宋体
+            'arial',
+            'helvetica'
+        ]
+    elif system == 'Linux':
+        fonts = [
+            'WenQuanYi Micro Hei',  # 文泉驿微米黑
+            'WenQuanYi Zen Hei',    # 文泉驿正黑
+            'Noto Sans CJK SC',     # Google Noto字体
+            'Noto Sans SC',
+            'DejaVuSans',
+            'FreeSans',
+            'Liberation Sans'
+        ]
+    else:  # MacOS
+        fonts = [
+            'PingFang SC',      # 苹方
+            'STHeiti',          # 华文黑体
+            'Hiragino Sans GB', # 冬青黑体
+            'Microsoft YaHei',  # 微软雅黑
+            'Arial Unicode MS',
+            'FreeSans',
+            'Arial'
+        ]
+    
+    available_fonts = [f.lower() for f in pygame.font.get_fonts()]
+    for font in fonts:
+        if font.lower().replace(' ', '') in available_fonts:
+            return font
     return None
 
 if __name__ == "__main__":
@@ -481,4 +605,4 @@ if __name__ == "__main__":
     if args.game:
         play_recorded_game(args.game)
     else:
-        play_game()  # Original interactive mode 
+        play_game() 
