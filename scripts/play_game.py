@@ -48,10 +48,11 @@ class ChessVisualizer:
         self.HIGHLIGHT_TO = (255, 255, 0, 128)  # 终点高亮（半透明黄色）
         self.MOVE_LINE = (0, 150, 255)  # 移动轨迹线（蓝色）
         
-        # 动画相关属性
-        self.last_move = None  # 存储最后一步移动
-        self.move_start_time = 0  # 移动开始时间
-        self.MOVE_DURATION = 500  # 移动动画持续时间（毫秒）
+        # 修改动画相关属性
+        self.last_move = None
+        self.move_start_time = 0
+        self.MOVE_DURATION = 1000  # 增加到1秒 (原来是500毫秒)
+        self.MOVE_INTERVAL = 1000  # 每步移动之间的间隔时间(1秒)
     
     def load_pieces(self):
         """Load piece images from the assets directory"""
@@ -366,6 +367,7 @@ def play_recorded_game(game_file):
     running = True
     move_index = 0
     last_move_time = 0
+    waiting_for_next_move = False
     
     while running:
         current_time = pygame.time.get_ticks()
@@ -380,87 +382,90 @@ def play_recorded_game(game_file):
                     env.reset()
                     move_index = 0
                     last_move_time = current_time
+                    waiting_for_next_move = False
         
-        if move_index < len(recorded_moves):
-            move = recorded_moves[move_index]
-            is_red_move = (move_index % 2 == 0)
-            print(f"\nProcessing move {move_index + 1}: {move} ({'Red' if is_red_move else 'Black'} to move)")
-            
-            # Verify current player
-            if env.current_player != is_red_move:
-                print(f"Warning: Expected {'Red' if is_red_move else 'Black'} to move")
-                env.current_player = is_red_move
-            
-            # Calculate and make move using environment's logic
-            from_pos, to_pos = env.calculate_move(move, is_red_move)
-            
-            if from_pos and to_pos:
-                print(f"Making move from {from_pos} to {to_pos}")
-                piece = env.board[from_pos[0]][from_pos[1]]
-                if piece:
-                    valid_moves = piece.get_moves(from_pos, env.board)
-                    if (from_pos, to_pos) in valid_moves:
-                        # 记录移动的棋子信息
-                        visualizer.last_piece_type = piece.piece_type
-                        visualizer.last_piece_is_red = piece.is_red
-                        
-                        # 设置移动动画
-                        visualizer.last_move = (from_pos, to_pos)
-                        visualizer.move_start_time = pygame.time.get_ticks()
-                        
-                        # 执行移动
-                        _, reward, done = env.step((from_pos, to_pos))
-                        print(f"Move made, reward: {reward}, done: {done}")
-                        move_index += 1
-                        last_move_time = current_time + visualizer.MOVE_DURATION  # 等待动画完成
-                        
-                        if done:
-                            winner = "红方" if reward > 0 else "黑方"
-                            print(f"游戏结束！{winner}获胜！")
-                            pygame.time.wait(3000)
+        # 只有在不处于等待状态时才处理下一步移动
+        if move_index < len(recorded_moves) and not waiting_for_next_move:
+            if current_time - last_move_time >= visualizer.MOVE_INTERVAL:
+                move = recorded_moves[move_index]
+                is_red_move = (move_index % 2 == 0)
+                print(f"\nProcessing move {move_index + 1}: {move} ({'Red' if is_red_move else 'Black'} to move)")
+                
+                # Verify current player
+                if env.current_player != is_red_move:
+                    print(f"Warning: Expected {'Red' if is_red_move else 'Black'} to move")
+                    env.current_player = is_red_move
+                
+                # Calculate and make move using environment's logic
+                from_pos, to_pos = env.calculate_move(move, is_red_move)
+                
+                if from_pos and to_pos:
+                    print(f"Making move from {from_pos} to {to_pos}")
+                    piece = env.board[from_pos[0]][from_pos[1]]
+                    if piece:
+                        valid_moves = piece.get_moves(from_pos, env.board)
+                        if (from_pos, to_pos) in valid_moves:
+                            visualizer.last_piece_type = piece.piece_type
+                            visualizer.last_piece_is_red = piece.is_red
+                            visualizer.last_move = (from_pos, to_pos)
+                            visualizer.move_start_time = current_time
+                            
+                            _, reward, done = env.step((from_pos, to_pos))
+                            move_index += 1
+                            waiting_for_next_move = True  # 设置等待状态
+                            last_move_time = current_time  # 更新最后移动时间
+                            
+                            if done:
+                                winner = "红方" if reward > 0 else "黑方"
+                                print(f"游戏结束！{winner}获胜！")
+                                pygame.time.wait(3000)
+                                running = False
+                        else:
+                            # 打印错误信息和合法移动
+                            error_msg = [
+                                f"错误：第{move_index + 1}步移动不合法！",
+                                f"移动：{move}",
+                                f"位置：从{from_pos}到{to_pos}",
+                                "",
+                                "该棋子的所有合法移动："
+                            ]
+                            if valid_moves:
+                                for i, (_, valid_to) in enumerate(valid_moves, 1):
+                                    error_msg.append(f"{i}. 到 {valid_to}")
+                            else:
+                                error_msg.append("该棋子当前没有合法移动！")
+                            
+                            print("\n".join(error_msg))
+                            
+                            # 等待用户按键继续
+                            waiting = True
+                            while waiting:
+                                for event in pygame.event.get():
+                                    if event.type == pygame.QUIT:
+                                        waiting = False
+                                        running = False
+                                    elif event.type == pygame.KEYDOWN:
+                                        if event.key in [pygame.K_ESCAPE, pygame.K_SPACE, pygame.K_RETURN]:
+                                            waiting = False
+                                pygame.time.wait(100)  # 减少CPU使用
+                            
                             running = False
                     else:
-                        # 打印错误信息和合法移动
-                        error_msg = [
-                            f"错误：第{move_index + 1}步移动不合法！",
-                            f"移动：{move}",
-                            f"位置：从{from_pos}到{to_pos}",
-                            "",
-                            "该棋子的所有合法移动："
-                        ]
-                        if valid_moves:
-                            for i, (_, valid_to) in enumerate(valid_moves, 1):
-                                error_msg.append(f"{i}. 到 {valid_to}")
-                        else:
-                            error_msg.append("该棋子当前没有合法移动！")
-                        
-                        print("\n".join(error_msg))
-                        
-                        # 等待用户按键继续
-                        waiting = True
-                        while waiting:
-                            for event in pygame.event.get():
-                                if event.type == pygame.QUIT:
-                                    waiting = False
-                                    running = False
-                                elif event.type == pygame.KEYDOWN:
-                                    if event.key in [pygame.K_ESCAPE, pygame.K_SPACE, pygame.K_RETURN]:
-                                        waiting = False
-                            pygame.time.wait(100)  # 减少CPU使用
-                        
+                        print(f"错误：第{move_index + 1}步起始位置没有棋子！")
+                        print(f"移动：{move}")
+                        print(f"位置：从{from_pos}到{to_pos}")
+                        pygame.time.wait(3000)
                         running = False
                 else:
-                    print(f"错误：第{move_index + 1}步起始位置没有棋子！")
+                    print(f"错误：第{move_index + 1}步无法解析！")
                     print(f"移动：{move}")
                     print(f"位置：从{from_pos}到{to_pos}")
                     pygame.time.wait(3000)
                     running = False
-            else:
-                print(f"错误：第{move_index + 1}步无法解析！")
-                print(f"移动：{move}")
-                print(f"位置：从{from_pos}到{to_pos}")
-                pygame.time.wait(3000)
-                running = False
+        
+        # 检查是否可以结束等待状态
+        if waiting_for_next_move and current_time - last_move_time >= visualizer.MOVE_DURATION:
+            waiting_for_next_move = False
         
         visualizer.draw_board(env)
         pygame.display.flip()
