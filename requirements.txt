@@ -5,5 +5,6 @@ tqdm==4.65.0
 pandas==1.5.3
 # transformers==4.36.0
 requests
+playwright
 # 如果是 Ubuntu/Debian Linux 系统，需要安装：
 # sudo apt-get install fonts-wqy-microhei

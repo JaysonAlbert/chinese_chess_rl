@@ -63,3 +63,5 @@ coverage.xml
 *.db
 
 scripts/assets/*.png
+resources/parsed_games/*.json
+resources/games/*.txt

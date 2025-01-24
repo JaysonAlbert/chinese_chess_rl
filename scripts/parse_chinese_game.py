@@ -1,6 +1,7 @@
 import re
 from enum import Enum
 import json
+import os
 
 class Piece(Enum):
     ROOK = "车"
@@ -58,18 +59,43 @@ class ChineseNotationParser:
         moves = []
         lines = game_text.strip().split('\n')
         
-        for line in lines:
-            # Split into red and black moves
+        # Find the first empty line to locate the start of moves
+        start_index = -1
+        for i, line in enumerate(lines):
+            if not line.strip():
+                start_index = i + 1
+                break
+        
+        if start_index == -1:
+            raise ValueError("Could not find start of moves section")
+        
+        # Find the end of moves (next empty line or end of file)
+        end_index = len(lines)
+        for i in range(start_index, len(lines)):
+            if not lines[i].strip():
+                end_index = i
+                break
+        
+        # Process only the moves section
+        for line in lines[start_index:end_index]:
+            line = line.strip()
+            if not line:  # Skip empty lines
+                continue
+            
+            # Split into moves (usually 4 parts: 2 move numbers + 2 actual moves)
             parts = line.split()
-            if len(parts) >= 4:  # Check for 4 moves (2 red, 2 black)
-                # Remove move numbers and spaces
-                # Remove move numbers and clean each part
-                parts = [re.sub(r'^\s*\d+\.', '', part).strip() for part in parts]
-                
-                moves.append(self.parse_move(parts[0], is_red=True))   # First red move
-                moves.append(self.parse_move(parts[1], is_red=False))  # First black move
-                moves.append(self.parse_move(parts[2], is_red=True))   # Second red move 
-                moves.append(self.parse_move(parts[3], is_red=False))  # Second black move
+            # Remove move numbers and clean each part
+            parts = [re.sub(r'^\s*\d+\.', '', part).strip() for part in parts]
+            
+            # Parse moves based on number of parts
+            if len(parts) >= 1:  # At least red move
+                moves.append(self.parse_move(parts[0], is_red=True))
+            if len(parts) >= 2:  # Red and black moves
+                moves.append(self.parse_move(parts[1], is_red=False))
+            if len(parts) >= 3:  # Red, black and second red
+                moves.append(self.parse_move(parts[2], is_red=True))
+            if len(parts) >= 4:  # Complete pair of moves
+                moves.append(self.parse_move(parts[3], is_red=False))
         return moves
 
     def parse_move(self, move_str, is_red):
@@ -109,22 +135,34 @@ class ChineseNotationParser:
 
 def main():
     # Read game text from file
-    with open('resources/game.txt', 'r', encoding='utf-8') as f:
-        game_text = f.read()
-    
     parser = ChineseNotationParser()
-    moves = parser.parse_game(game_text)
     
-    # Print moves for debugging
-    print("Parsed moves:")
-    for i, move in enumerate(moves):
-        print(f"{i+1}. {move}")
-    
-    # Convert to JSON for easier processing
-    with open('resources/parsed_game.json', 'w', encoding='utf-8') as f:
-        json.dump(moves, f, ensure_ascii=False, indent=2)
-    
-    print(f"\nSuccessfully parsed {len(moves)} moves and saved to parsed_game.json")
+    # Process each game file in the games directory
+    games_dir = 'resources/games'
+    for game_file in os.listdir(games_dir):
+        if game_file.endswith('.txt'):
+            game_path = os.path.join(games_dir, game_file)
+            with open(game_path, 'r', encoding='utf-8') as f:
+                game_text = f.read()
+            
+            try:
+                moves = parser.parse_game(game_text)
+                
+                # Create output filename based on input filename
+                output_filename = os.path.splitext(game_file)[0] + '.json'
+                output_path = os.path.join('resources/parsed_games', output_filename)
+                
+                # Ensure output directory exists
+                os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                
+                # Save parsed moves to JSON
+                with open(output_path, 'w', encoding='utf-8') as f:
+                    json.dump(moves, f, ensure_ascii=False, indent=2)
+                
+                print(f"Successfully parsed {len(moves)} moves from {game_file}")
+                
+            except Exception as e:
+                print(f"Error processing {game_file}: {str(e)}")
 
 if __name__ == "__main__":
     main() 
