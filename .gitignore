@@ -62,6 +62,6 @@ coverage.xml
 *.sqlite
 *.db
 
-scripts/assets/*.png
+assets/*.png
 resources/parsed_games/*.json
 resources/games/*.txt

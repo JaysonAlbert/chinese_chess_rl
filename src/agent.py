@@ -1,11 +1,11 @@
 import torch
 import numpy as np
-from model import XiangqiNet
+from model import XiangqiHybridNet
 
 class XiangqiAgent:
     def __init__(self, model=None):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = model if model is not None else XiangqiNet().to(self.device)
+        self.model = model if model is not None else XiangqiHybridNet().to(self.device)
         self.model.eval()
     
     def select_action(self, state, valid_moves, temperature=1.0):

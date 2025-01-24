@@ -8,51 +8,80 @@ from agent import XiangqiAgent
 from model import XiangqiHybridNet
 from visualize import XiangqiVisualizer
 import pandas as pd
-from xiangqi import Move
 
 def pretrain_on_database(model, database_path, num_epochs=10, batch_size=64):
     """Pretrain the model on human games database"""
     print("Loading game database...")
     games_df = pd.read_csv(database_path)
     
-    optimizer = optim.Adam(model.parameters(), lr=0.001)  # Can use higher learning rate with hybrid
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
     
     for epoch in range(num_epochs):
         total_loss = 0
         num_batches = 0
         
-        for _, game in tqdm(games_df.iterrows(), total=len(games_df)):
+        # 添加进度条
+        progress_bar = tqdm(games_df.iterrows(), total=len(games_df), 
+                          desc=f'Epoch {epoch+1}/{num_epochs}')
+        
+        for _, game in progress_bar:
             env = XiangqiEnv()
-            moves = game['moves'].split()  # Assuming moves are stored in algebraic notation
+            moves = game['moves'].split()
+            
+            # 批量处理来提高训练效率
+            states = []
+            target_moves = []
             
             for move_str in moves:
-                # Convert move string to our format
-                from_pos = (int(move_str[1]), int(move_str[0]))
-                to_pos = (int(move_str[3]), int(move_str[2]))
+                try:
+                    # 添加错误处理
+                    from_pos = (int(move_str[1]), int(move_str[0]))
+                    to_pos = (int(move_str[3]), int(move_str[2]))
+                    
+                    state = env._get_state()
+                    states.append(state)
+                    target_moves.append(env._move_to_index((from_pos, to_pos)))
+                    
+                    # 当收集够一个批次时进行训练
+                    if len(states) == batch_size:
+                        state_tensor = torch.FloatTensor(states)
+                        target_moves_tensor = torch.LongTensor(target_moves)
+                        
+                        policy, value = model(state_tensor)
+                        policy_loss = F.cross_entropy(policy, target_moves_tensor)
+                        
+                        optimizer.zero_grad()
+                        policy_loss.backward()
+                        optimizer.step()
+                        
+                        total_loss += policy_loss.item()
+                        num_batches += 1
+                        
+                        # 清空批次
+                        states = []
+                        target_moves = []
+                    
+                    # 执行移动
+                    env.step((from_pos, to_pos))
+                    
+                except (ValueError, IndexError) as e:
+                    print(f"跳过无效的移动: {move_str}, 错误: {e}")
+                    continue
+            
+            # 处理剩余的数据
+            if states:
+                state_tensor = torch.FloatTensor(states)
+                target_moves_tensor = torch.LongTensor(target_moves)
                 
-                state = env._get_state()
-                
-                # Get model's prediction
-                state_tensor = torch.FloatTensor(state).unsqueeze(0)
                 policy, value = model(state_tensor)
+                policy_loss = F.cross_entropy(policy, target_moves_tensor)
                 
-                # Calculate target
-                target_move = env._move_to_index((from_pos, to_pos))
-                target_move_tensor = torch.LongTensor([target_move])
-                
-                # Calculate loss
-                policy_loss = F.cross_entropy(policy, target_move_tensor)
-                
-                # Update model
                 optimizer.zero_grad()
                 policy_loss.backward()
                 optimizer.step()
                 
                 total_loss += policy_loss.item()
                 num_batches += 1
-                
-                # Make the move
-                env.step((from_pos, to_pos))
         
         avg_loss = total_loss / num_batches
         print(f"Epoch {epoch+1}/{num_epochs}, Average Loss: {avg_loss:.4f}")
@@ -129,17 +158,26 @@ def optimize_model(model, optimizer, batch_data):
     optimizer.step()
 
 if __name__ == "__main__":
-    # First pretrain on database
+    # Parse command line arguments
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--pretrain', action='store_true', help='Whether to pretrain on database')
+    args = parser.parse_args()
+
     model = XiangqiHybridNet()
     
-    # You would need to provide a path to your games database
-    database_path = "xiangqi_games.csv"
-    try:
-        pretrained_model = pretrain_on_database(model, database_path)
-        print("Pretraining completed. Starting reinforcement learning...")
-    except FileNotFoundError:
-        print("No game database found. Starting with untrained model...")
+    if args.pretrain:
+        # You would need to provide a path to your games database
+        database_path = "xiangqi_games.csv"
+        try:
+            pretrained_model = pretrain_on_database(model, database_path)
+            print("Pretraining completed. Starting reinforcement learning...")
+        except FileNotFoundError:
+            print("No game database found. Starting with untrained model...")
+            pretrained_model = model
+    else:
+        print("Skipping pretraining. Starting with untrained model...")
         pretrained_model = model
     
     # Then fine-tune with reinforcement learning
-    train(num_episodes=100, visualize=True, pretrained_model=pretrained_model) 
+    train(num_episodes=100, visualize=True, pretrained_model=pretrained_model)
