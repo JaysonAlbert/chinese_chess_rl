@@ -135,7 +135,7 @@ def train(num_episodes=1000, batch_size=64, visualize=True, pretrained_model=Non
         vis = XiangqiVisualizer(env)
     
     # Create checkpoint directory
-    checkpoint_dir = "checkpoints"
+    checkpoint_dir = "logs/checkpoints"
     os.makedirs(checkpoint_dir, exist_ok=True)
     
     # Track best model
