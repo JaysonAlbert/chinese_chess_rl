@@ -134,6 +134,14 @@ def train(num_episodes=1000, batch_size=64, visualize=True, pretrained_model=Non
     if visualize:
         vis = XiangqiVisualizer(env)
     
+    # Create checkpoint directory
+    checkpoint_dir = "checkpoints"
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    
+    # Track best model
+    best_reward = float('-inf')
+    best_win_rate = 0.0
+    
     try:
         episode_rewards = []
         episode_lengths = []
@@ -190,6 +198,9 @@ def train(num_episodes=1000, batch_size=64, visualize=True, pretrained_model=Non
                     action = agent.select_action(state_array, valid_moves, temperature=1.0)
                 
                 next_state, reward, done = env.step(action)
+                
+                # 保存经验到episode_data
+                episode_data.append((state_array, action, reward))
                 episode_reward += reward
                 
                 # 统计当前回合的数据
@@ -249,7 +260,7 @@ def train(num_episodes=1000, batch_size=64, visualize=True, pretrained_model=Non
             # 衰减epsilon
             epsilon = max(epsilon_end, epsilon * epsilon_decay)
             
-            # 更新经验回放
+            # 更新经验回放 - 现在episode_data不再为空
             replay_buffer.extend(episode_data)
             if len(replay_buffer) > max_buffer_size:
                 replay_buffer = replay_buffer[-max_buffer_size:]
@@ -344,9 +355,55 @@ def train(num_episodes=1000, batch_size=64, visualize=True, pretrained_model=Non
                 if visualize:
                     vis = XiangqiVisualizer(env)  # Recreate the main visualizer
             
+            # Save periodic checkpoints (every 1000 episodes)
+            if episode > 0 and episode % 1000 == 0:
+                checkpoint_path = os.path.join(checkpoint_dir, f"model_episode_{episode}.pt")
+                torch.save({
+                    'episode': episode,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'running_reward': running_reward,
+                    'epsilon': epsilon,
+                    'stats': stats,
+                    'replay_buffer': replay_buffer,
+                }, checkpoint_path)
+                logger.info(f"Saved checkpoint to {checkpoint_path}")
+            
+            # Save best model based on running reward
+            if running_reward > best_reward:
+                best_reward = running_reward
+                best_model_path = os.path.join(checkpoint_dir, "best_reward_model.pt")
+                torch.save(model.state_dict(), best_model_path)
+                logger.info(f"New best reward model saved: {running_reward:.2f}")
+            
+            # Save best model based on win rate
+            current_win_rate = stats['wins']/(episode+1)
+            if current_win_rate > best_win_rate and episode > 100:
+                best_win_rate = current_win_rate
+                best_model_path = os.path.join(checkpoint_dir, "best_winrate_model.pt")
+                torch.save(model.state_dict(), best_model_path)
+                logger.info(f"New best win-rate model saved: {current_win_rate:.2%}")
+            
     except KeyboardInterrupt:
-        logger.info("\nTraining interrupted")
+        # Save final model on interrupt
+        logger.info("\nTraining interrupted, saving checkpoint...")
+        interrupt_path = os.path.join(checkpoint_dir, "interrupted_model.pt")
+        torch.save({
+            'episode': episode,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'running_reward': running_reward,
+            'epsilon': epsilon,
+            'stats': stats,
+            'replay_buffer': replay_buffer,
+        }, interrupt_path)
+        logger.info(f"Saved interrupt checkpoint to {interrupt_path}")
     finally:
+        # Save final model
+        final_path = os.path.join(checkpoint_dir, "final_model.pt")
+        torch.save(model.state_dict(), final_path)
+        logger.info(f"Saved final model to {final_path}")
+        
         if visualize:
             vis.close()
         writer.close()
