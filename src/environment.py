@@ -375,8 +375,11 @@ class XiangqiEnv:
         self.reset()
     
     def reset(self):
-        # Initialize the board with pieces
-        # Black pieces (top)
+        """重置棋盘和所有状态值"""
+        # 重置棋盘
+        self.board = [[None for _ in range(9)] for _ in range(10)]
+        
+        # 初始化黑方棋子（上方）
         self.board[0] = [
             Rook(False), Horse(False), Elephant(False),
             Advisor(False), General(False), Advisor(False),
@@ -387,7 +390,7 @@ class XiangqiEnv:
         for i in [0, 2, 4, 6, 8]:
             self.board[3][i] = Pawn(False)
 
-        # Red pieces (bottom)
+        # 初始化红方棋子（下方）
         self.board[9] = [
             Rook(True), Horse(True), Elephant(True),
             Advisor(True), General(True), Advisor(True),
@@ -398,8 +401,21 @@ class XiangqiEnv:
         for i in [0, 2, 4, 6, 8]:
             self.board[6][i] = Pawn(True)
 
-        self.current_player = True  # Red moves first
-        return self.board
+        # 重置游戏状态
+        self.current_player = True  # 红方先手
+        self.move_count = 0  # 重置移动计数
+        self.last_move = None  # 记录最后一步移动
+        self.history = []  # 记录游戏历史
+        self.captured_pieces = {
+            True: [],   # 红方被吃的子
+            False: []   # 黑方被吃的子
+        }
+        
+        # 重置游戏结果相关状态
+        self.is_game_over = False
+        self.winner = None
+        
+        return self._get_state()
     
     def _get_state(self):
         """Convert board to neural network input"""
@@ -620,12 +636,12 @@ class XiangqiEnv:
         return len(valid_moves) == 0
 
     def step(self, action):
-        """Execute move and return new state"""
+        """执行移动并返回新状态"""
         from_pos, to_pos = action
         from_row, from_col = from_pos
         to_row, to_col = to_pos
         
-        # Get piece and check if it belongs to current player
+        # 获取棋子并检查是否属于当前玩家
         piece = self.board[from_row][from_col]
         if not piece or piece.is_red != self.current_player:
             return self._get_state(), -1, True
@@ -712,6 +728,30 @@ class XiangqiEnv:
             reward += 0.2
         elif to_row > 4 and not self.current_player:  # 黑方过河
             reward += 0.2
+        
+        # 记录移动历史
+        self.last_move = action
+        self.history.append({
+            'action': action,
+            'piece': piece.piece_type,
+            'is_red': piece.is_red,
+            'captured': captured_piece.piece_type if captured_piece else None
+        })
+        
+        # 如果有子被吃，记录到被吃子列表
+        if captured_piece:
+            self.captured_pieces[captured_piece.is_red].append(captured_piece)
+        
+        # 更新游戏结果状态
+        if is_checkmate and is_winning_move:
+            self.is_game_over = True
+            self.winner = self.current_player
+        elif is_checkmate:
+            self.is_game_over = True
+            self.winner = not self.current_player
+        elif self._is_stalemate():
+            self.is_game_over = True
+            self.winner = None
         
         return self._get_state(), reward, done
 

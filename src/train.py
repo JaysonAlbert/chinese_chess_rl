@@ -135,9 +135,27 @@ def train(num_episodes=1000, batch_size=64, visualize=True, pretrained_model=Non
         vis = XiangqiVisualizer(env)
     
     try:
-        episode_rewards = []  # Track rewards per episode
-        episode_lengths = []  # Track episode lengths
-        running_reward = 0  # For tracking moving average reward
+        episode_rewards = []
+        episode_lengths = []
+        running_reward = 0
+        
+        # 添加统计计数器
+        stats = {
+            'wins': 0,
+            'losses': 0,
+            'draws': 0,
+            'total_captures': 0,
+            'pieces_captured': {piece: 0 for piece in ['p', 'c', 'h', 'r', 'a', 'e', 'k']},
+            'moves_to_win': [],
+            'checks_made': 0,
+            'river_crosses': 0
+        }
+        
+        # 添加损失统计
+        running_policy_loss = 0
+        running_value_loss = 0
+        episode_policy_losses = []
+        episode_value_losses = []
         
         for episode in tqdm(range(num_episodes)):
             state = env.reset()
@@ -145,6 +163,11 @@ def train(num_episodes=1000, batch_size=64, visualize=True, pretrained_model=Non
             episode_data = []
             move_count = 0
             episode_reward = 0
+            episode_captures = 0
+            episode_checks = 0
+            episode_crosses = 0
+            policy_losses = []
+            value_losses = []
             
             while not done and move_count < max_moves:
                 if visualize:
@@ -168,10 +191,60 @@ def train(num_episodes=1000, batch_size=64, visualize=True, pretrained_model=Non
                 
                 next_state, reward, done = env.step(action)
                 episode_reward += reward
-                episode_data.append((state_array, action, reward))
+                
+                # 统计当前回合的数据
+                if env.last_move:
+                    # 记录吃子
+                    if 'captured' in env.history[-1] and env.history[-1]['captured']:
+                        episode_captures += 1
+                        captured_piece = env.history[-1]['captured']
+                        stats['pieces_captured'][captured_piece] += 1
+                        stats['total_captures'] += 1
+                    
+                    # 记录过河
+                    to_row = env.last_move[1][0]
+                    if (to_row < 5 and env.current_player) or (to_row > 4 and not env.current_player):
+                        episode_crosses += 1
+                
+                # 记录将军
+                if env._is_in_check():
+                    episode_checks += 1
                 
                 state = next_state
                 move_count += 1
+            
+            # 更新游戏结果统计
+            if env.is_game_over:
+                if env.winner is True:  # 红方胜
+                    stats['wins'] += 1
+                    stats['moves_to_win'].append(move_count)
+                elif env.winner is False:  # 黑方胜
+                    stats['losses'] += 1
+                else:  # 和棋
+                    stats['draws'] += 1
+            
+            # 更新统计
+            stats['checks_made'] += episode_checks
+            stats['river_crosses'] += episode_crosses
+            
+            # Log detailed metrics
+            writer.add_scalar('Game/Wins', stats['wins'], episode)
+            writer.add_scalar('Game/Losses', stats['losses'], episode)
+            writer.add_scalar('Game/Draws', stats['draws'], episode)
+            writer.add_scalar('Game/Win_Rate', stats['wins']/(episode+1), episode)
+            
+            writer.add_scalar('Actions/Captures_Per_Episode', episode_captures, episode)
+            writer.add_scalar('Actions/Checks_Per_Episode', episode_checks, episode)
+            writer.add_scalar('Actions/River_Crosses_Per_Episode', episode_crosses, episode)
+            
+            # Log piece-specific capture statistics
+            for piece, count in stats['pieces_captured'].items():
+                writer.add_scalar(f'Captures/{piece}_captured', count, episode)
+            
+            # Log average moves to win
+            if stats['moves_to_win']:
+                avg_moves_to_win = sum(stats['moves_to_win']) / len(stats['moves_to_win'])
+                writer.add_scalar('Game/Avg_Moves_To_Win', avg_moves_to_win, episode)
             
             # 衰减epsilon
             epsilon = max(epsilon_end, epsilon * epsilon_decay)
@@ -183,35 +256,74 @@ def train(num_episodes=1000, batch_size=64, visualize=True, pretrained_model=Non
             
             # 增加训练频率
             if len(replay_buffer) >= batch_size:
-                num_training_iterations = 8  # 从4增加到8
+                num_training_iterations = 8
                 for _ in range(num_training_iterations):
                     batch_indices = np.random.choice(len(replay_buffer), batch_size, replace=False)
                     batch_data = [replay_buffer[i] for i in batch_indices]
-                    optimize_model(model, optimizer, batch_data, agent)
+                    p_loss, v_loss = optimize_model(model, optimizer, batch_data, agent)
+                    policy_losses.append(p_loss)
+                    value_losses.append(v_loss)
+            
+            # 计算本回合的平均损失
+            if policy_losses:  # 如果这回合有训练
+                avg_policy_loss = np.mean(policy_losses)
+                avg_value_loss = np.mean(value_losses)
+                episode_policy_losses.append(avg_policy_loss)
+                episode_value_losses.append(avg_value_loss)
+                
+                # 更新运行平均损失
+                running_policy_loss = 0.95 * running_policy_loss + 0.05 * avg_policy_loss if episode > 0 else avg_policy_loss
+                running_value_loss = 0.95 * running_value_loss + 0.05 * avg_value_loss if episode > 0 else avg_value_loss
+                
+                # Log loss metrics
+                writer.add_scalar('Loss/Policy_Loss', avg_policy_loss, episode)
+                writer.add_scalar('Loss/Value_Loss', avg_value_loss, episode)
+                writer.add_scalar('Loss/Running_Policy_Loss', running_policy_loss, episode)
+                writer.add_scalar('Loss/Running_Value_Loss', running_value_loss, episode)
+                
+                # 计算并记录最近100回合的平均损失
+                if len(episode_policy_losses) >= 100:
+                    avg_policy_loss_100 = np.mean(episode_policy_losses[-100:])
+                    avg_value_loss_100 = np.mean(episode_value_losses[-100:])
+                    writer.add_scalar('Loss/Average_Policy_Loss_100', avg_policy_loss_100, episode)
+                    writer.add_scalar('Loss/Average_Value_Loss_100', avg_value_loss_100, episode)
             
             # Update statistics
             episode_rewards.append(episode_reward)
             episode_lengths.append(move_count)
             running_reward = 0.95 * running_reward + 0.05 * episode_reward if episode > 0 else episode_reward
             
-            # Log metrics to TensorBoard
+            # Log exploration and training metrics
             writer.add_scalar('Training/Epsilon', epsilon, episode)
             writer.add_scalar('Training/Episode_Reward', episode_reward, episode)
             writer.add_scalar('Training/Running_Reward', running_reward, episode)
             writer.add_scalar('Training/Episode_Length', move_count, episode)
             writer.add_scalar('Training/Buffer_Size', len(replay_buffer), episode)
             
-            # Log training progress every 100 episodes
+            # Log periodic statistics
             if episode % 100 == 0:
                 avg_reward = np.mean(episode_rewards[-100:]) if episode_rewards else 0
                 avg_length = np.mean(episode_lengths[-100:]) if episode_lengths else 0
+                
                 writer.add_scalar('Training/Average_Reward_100', avg_reward, episode)
                 writer.add_scalar('Training/Average_Length_100', avg_length, episode)
                 
+                # 添加详细日志
                 logger.info(f"Episode {episode}")
                 logger.info(f"Running reward: {running_reward:.2f}")
-                logger.info(f"Average reward (100 ep): {avg_reward:.2f}")
-                logger.info(f"Average length (100 ep): {avg_length:.2f}")
+                logger.info(f"Win rate: {stats['wins']/(episode+1):.2%}")
+                logger.info(f"Total captures: {stats['total_captures']}")
+                logger.info(f"Average moves to win: {avg_moves_to_win:.1f}" if stats['moves_to_win'] else "No wins yet")
+                logger.info(f"Buffer size: {len(replay_buffer)}")
+                logger.info(f"Epsilon: {epsilon:.3f}")
+                
+                # 添加损失信息到日志
+                if policy_losses:
+                    logger.info(f"Policy Loss: {running_policy_loss:.4f}")
+                    logger.info(f"Value Loss: {running_value_loss:.4f}")
+                    if len(episode_policy_losses) >= 100:
+                        logger.info(f"Avg Policy Loss (100 ep): {avg_policy_loss_100:.4f}")
+                        logger.info(f"Avg Value Loss (100 ep): {avg_value_loss_100:.4f}")
             
             if move_count >= max_moves:
                 logger.info(f"Episode {episode} reached move limit of {max_moves}")
@@ -244,7 +356,6 @@ def train(num_episodes=1000, batch_size=64, visualize=True, pretrained_model=Non
 def optimize_model(model, optimizer, batch_data, agent):
     states, actions, rewards = zip(*batch_data)
     
-    # Convert to numpy array first
     states_array = np.array(states)
     state_tensor = torch.FloatTensor(states_array)
     action_tensor = torch.LongTensor([agent._move_to_index(a) for a in actions])
@@ -262,7 +373,7 @@ def optimize_model(model, optimizer, batch_data, agent):
     loss.backward()
     optimizer.step()
     
-    return policy_loss.item(), value_loss.item()  # Return both losses for logging
+    return policy_loss.item(), value_loss.item()
 
 if __name__ == "__main__":
     # Parse command line arguments
