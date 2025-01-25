@@ -653,7 +653,7 @@ class XiangqiEnv:
         # Game is over if king is captured or checkmate
         done = is_winning_move or is_checkmate
         
-        reward = 0
+        # 调整奖励尺度
         piece_values = {
             'p': 1,   # 兵/卒
             'c': 4,   # 炮
@@ -664,47 +664,54 @@ class XiangqiEnv:
             'k': 100  # 将/帅
         }
         
-        # 1. 吃子奖励
-        if captured_piece:  # 如果目标位置有棋子
-            reward += piece_values.get(captured_piece.piece_type, 0) * 0.1
+        reward = 0
+        # 1. 吃子奖励 - 增加基础奖励
+        if captured_piece:
+            reward += piece_values.get(captured_piece.piece_type, 0) * 0.3  # 从0.1增加到0.3
         
-        # 2. 位置奖励
-        # 鼓励控制中心区域
+        # 2. 位置奖励 - 增加中心控制奖励
         central_positions = [(4, 1), (4, 2), (4, 7), (4, 8)]
         if (to_row, to_col) in central_positions:
-            reward += 0.05
+            reward += 0.2  # 从0.05增加到0.2
         
-        # 3. 威胁奖励
-        # 如果移动后威胁到对方的重要棋子
+        # 3. 威胁奖励 - 增加威胁奖励
         threatened_pieces = self._get_threatened_pieces((to_row, to_col))
         for piece in threatened_pieces:
-            reward += piece_values.get(piece.piece_type, 0) * 0.05
+            reward += piece_values.get(piece.piece_type, 0) * 0.15  # 从0.05增加到0.15
         
-        # 4. 保护奖励
-        # 如果移动后保护了自己的重要棋子
+        # 4. 保护奖励 - 增加保护奖励
         protected_pieces = self._get_protected_pieces((to_row, to_col))
         for piece in protected_pieces:
-            reward += piece_values.get(piece.piece_type, 0) * 0.02
+            reward += piece_values.get(piece.piece_type, 0) * 0.1  # 从0.02增加到0.1
         
-        # 5. 游戏结束奖励
+        # 5. 游戏结束奖励 - 调整胜负奖励
         if is_checkmate and is_winning_move:
-            reward = 1.0  # 将军并获胜
+            reward = 5.0  # 从1.0增加到5.0
         elif is_checkmate:
-            reward = -1.0  # 被将死
+            reward = -3.0  # 从-1.0改为-3.0，减少惩罚
         elif self._is_in_check():
-            reward += 0.1  # 将军但未获胜
+            reward += 0.5  # 从0.1增加到0.5
         elif self._is_stalemate():
-            reward = 0.0  # 和棋
-            done = True
+            reward = -0.5  # 从0改为-0.5，轻微惩罚和棋
         
-        # 6. 惩罚过长的游戏
+        # 6. 惩罚过长的游戏 - 减少惩罚力度
         if hasattr(self, 'move_count'):
             self.move_count += 1
         else:
             self.move_count = 1
         
         if self.move_count > 200:
-            reward -= 0.001 * (self.move_count - 200)  # 每超过200步略微惩罚
+            reward -= 0.0005 * (self.move_count - 200)  # 从0.001减少到0.0005
+        
+        # 7. 添加移动有效性奖励
+        if action in valid_moves:
+            reward += 0.1  # 奖励有效移动
+        
+        # 8. 添加进攻性奖励
+        if to_row < 5 and self.current_player:  # 红方过河
+            reward += 0.2
+        elif to_row > 4 and not self.current_player:  # 黑方过河
+            reward += 0.2
         
         return self._get_state(), reward, done
 

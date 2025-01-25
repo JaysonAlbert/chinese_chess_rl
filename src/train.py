@@ -12,6 +12,7 @@ from visualize import XiangqiVisualizer
 import pandas as pd
 import os
 from torch.utils.tensorboard import SummaryWriter
+import random
 
 # Set up logger
 logging.basicConfig(
@@ -118,11 +119,17 @@ def train(num_episodes=1000, batch_size=64, visualize=True, pretrained_model=Non
         model = XiangqiHybridNet()
         
     agent = XiangqiAgent(model)
-    optimizer = optim.Adam(model.parameters(), lr=0.0001)
+    optimizer = optim.Adam(model.parameters(), lr=0.0003)
     
     # 创建回放缓冲区
     replay_buffer = []
     max_buffer_size = 100000  # 设置缓冲区最大容量
+    
+    # 添加epsilon-greedy探索
+    epsilon_start = 1.0
+    epsilon_end = 0.1
+    epsilon_decay = 0.995
+    epsilon = epsilon_start
     
     if visualize:
         vis = XiangqiVisualizer(env)
@@ -137,9 +144,7 @@ def train(num_episodes=1000, batch_size=64, visualize=True, pretrained_model=Non
             done = False
             episode_data = []
             move_count = 0
-            episode_reward = 0  # Total reward for this episode
-            policy_losses = []  # Track policy losses within episode
-            value_losses = []   # Track value losses within episode
+            episode_reward = 0
             
             while not done and move_count < max_moves:
                 if visualize:
@@ -154,7 +159,13 @@ def train(num_episodes=1000, batch_size=64, visualize=True, pretrained_model=Non
                     break
                     
                 state_array = env._get_state()
-                action = agent.select_action(state_array, valid_moves, temperature=1.0)
+                
+                # 使用epsilon-greedy策略选择动作
+                if random.random() < epsilon:
+                    action = random.choice(valid_moves)
+                else:
+                    action = agent.select_action(state_array, valid_moves, temperature=1.0)
+                
                 next_state, reward, done = env.step(action)
                 episode_reward += reward
                 episode_data.append((state_array, action, reward))
@@ -162,23 +173,21 @@ def train(num_episodes=1000, batch_size=64, visualize=True, pretrained_model=Non
                 state = next_state
                 move_count += 1
             
-            # 将本局的数据添加到回放缓冲区
-            replay_buffer.extend(episode_data)
+            # 衰减epsilon
+            epsilon = max(epsilon_end, epsilon * epsilon_decay)
             
-            # 如果超出最大容量，移除最早的数据
+            # 更新经验回放
+            replay_buffer.extend(episode_data)
             if len(replay_buffer) > max_buffer_size:
                 replay_buffer = replay_buffer[-max_buffer_size:]
             
-            # 只要缓冲区中的数据量足够一个batch，就进行多次训练
+            # 增加训练频率
             if len(replay_buffer) >= batch_size:
-                num_training_iterations = 4  # 每局结束后的训练次数
+                num_training_iterations = 8  # 从4增加到8
                 for _ in range(num_training_iterations):
-                    # 随机采样一个batch的数据
                     batch_indices = np.random.choice(len(replay_buffer), batch_size, replace=False)
                     batch_data = [replay_buffer[i] for i in batch_indices]
-                    p_loss, v_loss = optimize_model(model, optimizer, batch_data, agent)
-                    policy_losses.append(p_loss)
-                    value_losses.append(v_loss)
+                    optimize_model(model, optimizer, batch_data, agent)
             
             # Update statistics
             episode_rewards.append(episode_reward)
@@ -186,20 +195,11 @@ def train(num_episodes=1000, batch_size=64, visualize=True, pretrained_model=Non
             running_reward = 0.95 * running_reward + 0.05 * episode_reward if episode > 0 else episode_reward
             
             # Log metrics to TensorBoard
+            writer.add_scalar('Training/Epsilon', epsilon, episode)
             writer.add_scalar('Training/Episode_Reward', episode_reward, episode)
             writer.add_scalar('Training/Running_Reward', running_reward, episode)
             writer.add_scalar('Training/Episode_Length', move_count, episode)
             writer.add_scalar('Training/Buffer_Size', len(replay_buffer), episode)
-            
-            if policy_losses:  # Only log if we did training this episode
-                writer.add_scalar('Loss/Policy_Loss', np.mean(policy_losses), episode)
-                writer.add_scalar('Loss/Value_Loss', np.mean(value_losses), episode)
-            
-            # Log action statistics
-            if episode_data:
-                actions = [data[1] for data in episode_data]
-                unique_actions = len(set(str(a) for a in actions))  # Convert to str for set operation
-                writer.add_scalar('Game/Unique_Actions_Used', unique_actions, episode)
             
             # Log training progress every 100 episodes
             if episode % 100 == 0:
