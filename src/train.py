@@ -163,6 +163,8 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--pretrain', action='store_true', help='Whether to pretrain on database')
+    parser.add_argument('--visualize', action='store_true', help='Whether to visualize training')
+    parser.add_argument('--episodes', type=int, default=100, help='Number of episodes to train')
     args = parser.parse_args()
 
     model = XiangqiHybridNet()
@@ -181,4 +183,4 @@ if __name__ == "__main__":
         pretrained_model = model
     
     # Then fine-tune with reinforcement learning
-    train(num_episodes=100, visualize=True, pretrained_model=pretrained_model)
+    train(num_episodes=args.episodes, visualize=args.visualize, pretrained_model=pretrained_model)
