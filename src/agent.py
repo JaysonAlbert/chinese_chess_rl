@@ -9,9 +9,12 @@ class XiangqiAgent:
         self.model.eval()
     
     def select_action(self, state, valid_moves, temperature=1.0):
-        """Select an action using MCTS and the neural network"""
+        """Select an action from valid moves using the model's policy"""
+        # Move state tensor to the same device as the model
+        device = next(self.model.parameters()).device
+        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
+        
         with torch.no_grad():
-            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
             policy, value = self.model(state_tensor)
             
             # Convert policy to probabilities

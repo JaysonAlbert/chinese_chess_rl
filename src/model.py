@@ -27,7 +27,7 @@ class XiangqiHybridNet(nn.Module):
         )
         
         # Position encoding for attention
-        self.pos_encoding = nn.Parameter(torch.randn(1, 90, channels))  # 90 = 9x10 board
+        self.register_buffer('pos_encoding', torch.randn(1, 90, channels))  # 90 = 9x10 board
         
         # Policy head
         self.policy_head = nn.Sequential(
@@ -98,4 +98,9 @@ class XiangqiHybridNet(nn.Module):
             # Get attention weights
             _, attention_weights = self.attention(features, features, features)
             
-            return attention_weights 
+            return attention_weights
+
+    def to(self, device):
+        """Override to() to ensure pos_encoding moves to the correct device"""
+        super().to(device)
+        return self 

@@ -116,7 +116,8 @@ def train(num_episodes=1000, batch_size=64, visualize=True, pretrained_model=Non
     if pretrained_model:
         model = pretrained_model
     else:
-        model = XiangqiHybridNet()
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        model = XiangqiHybridNet().to(device)
         
     agent = XiangqiAgent(model)
     optimizer = optim.Adam(model.parameters(), lr=0.0003)
@@ -413,10 +414,14 @@ def train(num_episodes=1000, batch_size=64, visualize=True, pretrained_model=Non
 def optimize_model(model, optimizer, batch_data, agent):
     states, actions, rewards = zip(*batch_data)
     
+    # Get the device from the model
+    device = next(model.parameters()).device
+    
+    # Move tensors to the correct device
     states_array = np.array(states)
-    state_tensor = torch.FloatTensor(states_array)
-    action_tensor = torch.LongTensor([agent._move_to_index(a) for a in actions])
-    reward_tensor = torch.FloatTensor(rewards)
+    state_tensor = torch.FloatTensor(states_array).to(device)
+    action_tensor = torch.LongTensor([agent._move_to_index(a) for a in actions]).to(device)
+    reward_tensor = torch.FloatTensor(rewards).to(device)
     
     # Calculate loss
     policy, value = model(state_tensor)
