@@ -121,14 +121,15 @@ def train(num_episodes=1000, batch_size=64, visualize=True, pretrained_model=Non
                 if not valid_moves:
                     break
                     
-                action = agent.select_action(state, valid_moves, temperature=1.0)
+                state_array = env._get_state()  # Get numerical state representation
+                action = agent.select_action(state_array, valid_moves, temperature=1.0)
                 next_state, reward, done = env.step(action)
-                episode_data.append((state, action, reward))
+                episode_data.append((state_array, action, reward))
                 
                 state = next_state
             
             if len(episode_data) >= batch_size:
-                optimize_model(model, optimizer, episode_data[-batch_size:])
+                optimize_model(model, optimizer, episode_data[-batch_size:], agent)
                 
     except KeyboardInterrupt:
         print("\nTraining interrupted")
@@ -138,7 +139,7 @@ def train(num_episodes=1000, batch_size=64, visualize=True, pretrained_model=Non
     
     return model
 
-def optimize_model(model, optimizer, batch_data):
+def optimize_model(model, optimizer, batch_data, agent):
     states, actions, rewards = zip(*batch_data)
     
     state_tensor = torch.FloatTensor(states)

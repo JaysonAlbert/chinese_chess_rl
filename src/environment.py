@@ -483,7 +483,67 @@ class XiangqiEnv:
                 piece = self.board[i][j]
                 if piece and piece.is_red == self.current_player:
                     moves.extend(self._get_piece_moves((i, j)))
-        return moves
+        
+        # Filter out moves that would result in flying general
+        valid_moves = []
+        for move in moves:
+            # Simulate the move
+            from_pos, to_pos = move
+            from_row, from_col = from_pos
+            to_row, to_col = to_pos
+            
+            # Store original pieces
+            moving_piece = self.board[from_row][from_col]
+            captured_piece = self.board[to_row][to_col]
+            
+            # Make move
+            self.board[to_row][to_col] = moving_piece
+            self.board[from_row][from_col] = None
+            
+            # Check if kings face each other
+            if not self._kings_face_each_other():
+                valid_moves.append(move)
+            
+            # Restore board
+            self.board[from_row][from_col] = moving_piece
+            self.board[to_row][to_col] = captured_piece
+        
+        return valid_moves
+    
+    def _kings_face_each_other(self):
+        """Check if the two kings face each other directly"""
+        # Find positions of both kings
+        red_king_pos = None
+        black_king_pos = None
+        
+        for i in range(10):
+            for j in range(9):
+                piece = self.board[i][j]
+                if piece and piece.piece_type == 'k':
+                    if piece.is_red:
+                        red_king_pos = (i, j)
+                    else:
+                        black_king_pos = (i, j)
+        
+        if not (red_king_pos and black_king_pos):
+            return False
+        
+        # Check if kings are in the same column
+        red_row, red_col = red_king_pos
+        black_row, black_col = black_king_pos
+        
+        if red_col != black_col:
+            return False
+        
+        # Check if there are any pieces between them
+        min_row = min(red_row, black_row)
+        max_row = max(red_row, black_row)
+        
+        for row in range(min_row + 1, max_row):
+            if self.board[row][red_col]:
+                return False
+        
+        return True
     
     def step(self, action):
         """Execute move and return new state"""
@@ -501,6 +561,10 @@ class XiangqiEnv:
         if action not in valid_moves:
             return self._get_state(), -1, True
         
+        # Check if capturing opponent's general/king
+        captured_piece = self.board[to_row][to_col]
+        is_winning_move = captured_piece and captured_piece.piece_type == 'k'
+        
         # Move the piece
         self.board[to_row][to_col] = piece
         self.board[from_row][from_col] = None
@@ -508,9 +572,15 @@ class XiangqiEnv:
         # Switch players
         self.current_player = not self.current_player
         
-        # Simple reward: 1 for winning, -1 for losing, 0 otherwise
-        reward = 0
-        done = False
+        # Check if next player has any valid moves
+        next_valid_moves = self.get_valid_moves()
+        is_checkmate = len(next_valid_moves) == 0
+        
+        # Game is over if king is captured or checkmate
+        done = is_winning_move or is_checkmate
+        
+        # Reward: 1 for winning, -1 for losing
+        reward = 1 if done else 0
         
         return self._get_state(), reward, done
 
