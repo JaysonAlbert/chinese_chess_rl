@@ -545,6 +545,80 @@ class XiangqiEnv:
         
         return True
     
+    def _is_in_check(self):
+        """检查当前玩家是否被将军"""
+        # 找到当前玩家的将/帅
+        king_pos = None
+        for i in range(10):
+            for j in range(9):
+                piece = self.board[i][j]
+                if piece and piece.piece_type == 'k' and piece.is_red == self.current_player:
+                    king_pos = (i, j)
+                    break
+            if king_pos:
+                break
+        
+        if not king_pos:
+            return False  # 如果找不到将/帅，返回False
+        
+        # 检查对手的所有棋子是否可以攻击到将/帅
+        for i in range(10):
+            for j in range(9):
+                piece = self.board[i][j]
+                if piece and piece.is_red != self.current_player:  # 对手的棋子
+                    valid_moves = piece.get_moves((i, j), self.board)
+                    for _, to_pos in valid_moves:
+                        if to_pos == king_pos:  # 可以攻击到将/帅
+                            return True
+        
+        return False
+
+    def _is_checkmate(self):
+        """检查是否将死"""
+        # 首先检查是否被将军
+        if not self._is_in_check():
+            return False
+        
+        # 获取所有可能的移动
+        valid_moves = self.get_valid_moves()
+        if not valid_moves:
+            return True  # 无法移动，被将死
+        
+        # 尝试每一个可能的移动，看是否能解除将军
+        for move in valid_moves:
+            # 保存当前状态
+            from_pos, to_pos = move
+            from_row, from_col = from_pos
+            to_row, to_col = to_pos
+            moving_piece = self.board[from_row][from_col]
+            captured_piece = self.board[to_row][to_col]
+            
+            # 尝试移动
+            self.board[to_row][to_col] = moving_piece
+            self.board[from_row][from_col] = None
+            
+            # 检查是否仍然被将军
+            still_in_check = self._is_in_check()
+            
+            # 恢复状态
+            self.board[from_row][from_col] = moving_piece
+            self.board[to_row][to_col] = captured_piece
+            
+            if not still_in_check:
+                return False  # 找到一个可以解除将军的移动
+        
+        return True  # 所有移动都无法解除将军，确实被将死
+
+    def _is_stalemate(self):
+        """检查是否和棋"""
+        # 如果被将军但没被将死，不是和棋
+        if self._is_in_check():
+            return False
+        
+        # 如果没有合法移动，是和棋
+        valid_moves = self.get_valid_moves()
+        return len(valid_moves) == 0
+
     def step(self, action):
         """Execute move and return new state"""
         from_pos, to_pos = action
@@ -579,8 +653,58 @@ class XiangqiEnv:
         # Game is over if king is captured or checkmate
         done = is_winning_move or is_checkmate
         
-        # Reward: 1 for winning, -1 for losing
-        reward = 1 if done else 0
+        reward = 0
+        piece_values = {
+            'p': 1,   # 兵/卒
+            'c': 4,   # 炮
+            'h': 4,   # 马
+            'r': 9,   # 车
+            'a': 2,   # 士
+            'e': 2,   # 象
+            'k': 100  # 将/帅
+        }
+        
+        # 1. 吃子奖励
+        if captured_piece:  # 如果目标位置有棋子
+            reward += piece_values.get(captured_piece.piece_type, 0) * 0.1
+        
+        # 2. 位置奖励
+        # 鼓励控制中心区域
+        central_positions = [(4, 1), (4, 2), (4, 7), (4, 8)]
+        if (to_row, to_col) in central_positions:
+            reward += 0.05
+        
+        # 3. 威胁奖励
+        # 如果移动后威胁到对方的重要棋子
+        threatened_pieces = self._get_threatened_pieces((to_row, to_col))
+        for piece in threatened_pieces:
+            reward += piece_values.get(piece.piece_type, 0) * 0.05
+        
+        # 4. 保护奖励
+        # 如果移动后保护了自己的重要棋子
+        protected_pieces = self._get_protected_pieces((to_row, to_col))
+        for piece in protected_pieces:
+            reward += piece_values.get(piece.piece_type, 0) * 0.02
+        
+        # 5. 游戏结束奖励
+        if is_checkmate and is_winning_move:
+            reward = 1.0  # 将军并获胜
+        elif is_checkmate:
+            reward = -1.0  # 被将死
+        elif self._is_in_check():
+            reward += 0.1  # 将军但未获胜
+        elif self._is_stalemate():
+            reward = 0.0  # 和棋
+            done = True
+        
+        # 6. 惩罚过长的游戏
+        if hasattr(self, 'move_count'):
+            self.move_count += 1
+        else:
+            self.move_count = 1
+        
+        if self.move_count > 200:
+            reward -= 0.001 * (self.move_count - 200)  # 每超过200步略微惩罚
         
         return self._get_state(), reward, done
 
@@ -669,3 +793,33 @@ class XiangqiEnv:
             "兵": 'p', "卒": 'p',  # Pawn
         }
         return mapping.get(piece, '') 
+
+    def _get_threatened_pieces(self, pos):
+        """获取在给定位置可以威胁到的对方棋子"""
+        row, col = pos
+        piece = self.board[row][col]
+        if not piece:
+            return []
+        
+        threatened = []
+        valid_moves = piece.get_moves(pos, self.board)
+        for _, (to_row, to_col) in valid_moves:
+            target = self.board[to_row][to_col]
+            if target and target.is_red != piece.is_red:
+                threatened.append(target)
+        return threatened
+
+    def _get_protected_pieces(self, pos):
+        """获取在给定位置可以保护到的己方棋子"""
+        row, col = pos
+        piece = self.board[row][col]
+        if not piece:
+            return []
+        
+        protected = []
+        valid_moves = piece.get_moves(pos, self.board)
+        for _, (to_row, to_col) in valid_moves:
+            target = self.board[to_row][to_col]
+            if target and target.is_red == piece.is_red:
+                protected.append(target)
+        return protected 

@@ -128,11 +128,18 @@ def train(num_episodes=1000, batch_size=64, visualize=True, pretrained_model=Non
         vis = XiangqiVisualizer(env)
     
     try:
+        episode_rewards = []  # Track rewards per episode
+        episode_lengths = []  # Track episode lengths
+        running_reward = 0  # For tracking moving average reward
+        
         for episode in tqdm(range(num_episodes)):
             state = env.reset()
             done = False
             episode_data = []
             move_count = 0
+            episode_reward = 0  # Total reward for this episode
+            policy_losses = []  # Track policy losses within episode
+            value_losses = []   # Track value losses within episode
             
             while not done and move_count < max_moves:
                 if visualize:
@@ -149,6 +156,7 @@ def train(num_episodes=1000, batch_size=64, visualize=True, pretrained_model=Non
                 state_array = env._get_state()
                 action = agent.select_action(state_array, valid_moves, temperature=1.0)
                 next_state, reward, done = env.step(action)
+                episode_reward += reward
                 episode_data.append((state_array, action, reward))
                 
                 state = next_state
@@ -168,11 +176,42 @@ def train(num_episodes=1000, batch_size=64, visualize=True, pretrained_model=Non
                     # 随机采样一个batch的数据
                     batch_indices = np.random.choice(len(replay_buffer), batch_size, replace=False)
                     batch_data = [replay_buffer[i] for i in batch_indices]
-                    optimize_model(model, optimizer, batch_data, agent)
+                    p_loss, v_loss = optimize_model(model, optimizer, batch_data, agent)
+                    policy_losses.append(p_loss)
+                    value_losses.append(v_loss)
             
-            # Log metrics
-            writer.add_scalar('Game/Moves_Per_Episode', move_count, episode)
+            # Update statistics
+            episode_rewards.append(episode_reward)
+            episode_lengths.append(move_count)
+            running_reward = 0.95 * running_reward + 0.05 * episode_reward if episode > 0 else episode_reward
+            
+            # Log metrics to TensorBoard
+            writer.add_scalar('Training/Episode_Reward', episode_reward, episode)
+            writer.add_scalar('Training/Running_Reward', running_reward, episode)
+            writer.add_scalar('Training/Episode_Length', move_count, episode)
             writer.add_scalar('Training/Buffer_Size', len(replay_buffer), episode)
+            
+            if policy_losses:  # Only log if we did training this episode
+                writer.add_scalar('Loss/Policy_Loss', np.mean(policy_losses), episode)
+                writer.add_scalar('Loss/Value_Loss', np.mean(value_losses), episode)
+            
+            # Log action statistics
+            if episode_data:
+                actions = [data[1] for data in episode_data]
+                unique_actions = len(set(str(a) for a in actions))  # Convert to str for set operation
+                writer.add_scalar('Game/Unique_Actions_Used', unique_actions, episode)
+            
+            # Log training progress every 100 episodes
+            if episode % 100 == 0:
+                avg_reward = np.mean(episode_rewards[-100:]) if episode_rewards else 0
+                avg_length = np.mean(episode_lengths[-100:]) if episode_lengths else 0
+                writer.add_scalar('Training/Average_Reward_100', avg_reward, episode)
+                writer.add_scalar('Training/Average_Length_100', avg_length, episode)
+                
+                logger.info(f"Episode {episode}")
+                logger.info(f"Running reward: {running_reward:.2f}")
+                logger.info(f"Average reward (100 ep): {avg_reward:.2f}")
+                logger.info(f"Average length (100 ep): {avg_length:.2f}")
             
             if move_count >= max_moves:
                 logger.info(f"Episode {episode} reached move limit of {max_moves}")
@@ -222,6 +261,8 @@ def optimize_model(model, optimizer, batch_data, agent):
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
+    
+    return policy_loss.item(), value_loss.item()  # Return both losses for logging
 
 if __name__ == "__main__":
     # Parse command line arguments
