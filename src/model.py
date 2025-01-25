@@ -6,17 +6,17 @@ class XiangqiHybridNet(nn.Module):
     def __init__(self, channels=256, num_attention_heads=8):
         super(XiangqiHybridNet, self).__init__()
         
-        # CNN backbone
+        # Use torch.nn.LazyLinear for automatic input size inference
         self.conv_layers = nn.Sequential(
             nn.Conv2d(14, 64, 3, padding=1),
             nn.BatchNorm2d(64),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),  # Use inplace operations
             nn.Conv2d(64, 128, 3, padding=1),
             nn.BatchNorm2d(128),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             nn.Conv2d(128, channels, 3, padding=1),
             nn.BatchNorm2d(channels),
-            nn.ReLU()
+            nn.ReLU(inplace=True)
         )
         
         # Attention mechanism

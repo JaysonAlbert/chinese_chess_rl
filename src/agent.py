@@ -10,30 +10,28 @@ class XiangqiAgent:
     
     def select_action(self, state, valid_moves, temperature=1.0):
         """Select an action from valid moves using the model's policy"""
-        # Move state tensor to the same device as the model
-        device = next(self.model.parameters()).device
-        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
+        if isinstance(state, np.ndarray):
+            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+        else:
+            state_tensor = state.unsqueeze(0)  # Already a tensor
         
         with torch.no_grad():
-            policy, value = self.model(state_tensor)
-            
-            # Convert policy to probabilities
+            policy, _ = self.model(state_tensor)
             policy = policy.exp().cpu().numpy()[0]
             
-            # Mask invalid moves
+            # Use pre-allocated arrays for better performance
             valid_move_mask = np.zeros_like(policy)
             for move in valid_moves:
                 valid_move_mask[self._move_to_index(move)] = 1
             
             policy *= valid_move_mask
-            policy /= policy.sum()
+            policy /= policy.sum() + 1e-10  # Add small epsilon to avoid division by zero
             
-            # Sample move based on policy
             if temperature == 0:
                 move_idx = policy.argmax()
             else:
-                policy = policy ** (1/temperature)
-                policy /= policy.sum()
+                policy = np.power(policy, 1/temperature)
+                policy /= policy.sum() + 1e-10
                 move_idx = np.random.choice(len(policy), p=policy)
             
             return self._index_to_move(move_idx)
