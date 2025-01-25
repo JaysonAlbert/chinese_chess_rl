@@ -65,3 +65,5 @@ coverage.xml
 assets/*.png
 resources/parsed_games/*.json
 resources/games/*.txt
+
+logs

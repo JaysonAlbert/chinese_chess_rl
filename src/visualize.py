@@ -89,6 +89,10 @@ class XiangqiVisualizer:
         self.MOVE_DURATION = 1000  # 增加到1秒 (原来是500毫秒)
         self.MOVE_INTERVAL = 1000  # 每步移动之间的间隔时间(1秒)
     
+    def close(self):
+        """Clean up pygame resources"""
+        pygame.quit()
+    
     def load_pieces(self):
         """Load piece images from the assets directory"""
         # Create assets directory if it doesn't exist
