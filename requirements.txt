@@ -1,8 +1,8 @@
 torch
-numpy==1.24.3
+numpy
 pygame
 tqdm
-pandas==2.0.3
+pandas
 transformers
 requests
 playwright

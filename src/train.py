@@ -13,6 +13,13 @@ import pandas as pd
 import os
 from torch.utils.tensorboard import SummaryWriter
 import random
+import torch.multiprocessing as mp
+from torch.multiprocessing import Queue, Event
+from collections import deque
+import time
+import multiprocessing
+from tqdm.auto import tqdm
+import queue
 
 # Set up logger
 logging.basicConfig(
@@ -104,87 +111,37 @@ def pretrain_on_database(model, database_path, num_epochs=10, batch_size=64):
     
     return model
 
-def train(num_episodes=1000, batch_size=64, visualize=True, pretrained_model=None, max_moves=2000):
+def play_games(rank, model, experience_queue, stop_event, num_episodes, max_moves, visualize=False, progress_queue=None):
+    """Process function to play games and collect experience"""
     env = XiangqiEnv()
-    
-    # Set up TensorBoard writer
-    log_dir = "logs/tensorboard"
-    os.makedirs(log_dir, exist_ok=True)
-    writer = SummaryWriter(log_dir)
-    
-    # Load pretrained model or create new one
-    if pretrained_model:
-        model = pretrained_model
-    else:
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        model = XiangqiHybridNet().to(device)
-        
     agent = XiangqiAgent(model)
-    optimizer = optim.Adam(model.parameters(), lr=0.0003)
     
-    # 创建回放缓冲区
-    replay_buffer = []
-    max_buffer_size = 100000  # 设置缓冲区最大容量
+    if visualize and rank == 0:
+        vis = XiangqiVisualizer(env)
+    else:
+        vis = None
     
-    # 添加epsilon-greedy探索
     epsilon_start = 1.0
     epsilon_end = 0.1
     epsilon_decay = 0.995
     epsilon = epsilon_start
     
-    if visualize:
-        vis = XiangqiVisualizer(env)
-    
-    # Create checkpoint directory
-    checkpoint_dir = "logs/checkpoints"
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    
-    # Track best model
-    best_reward = float('-inf')
-    best_win_rate = 0.0
-    
     try:
-        episode_rewards = []
-        episode_lengths = []
-        running_reward = 0
-        
-        # 添加统计计数器
-        stats = {
-            'wins': 0,
-            'losses': 0,
-            'draws': 0,
-            'total_captures': 0,
-            'pieces_captured': {piece: 0 for piece in ['p', 'c', 'h', 'r', 'a', 'e', 'k']},
-            'moves_to_win': [],
-            'checks_made': 0,
-            'river_crosses': 0
-        }
-        
-        # 添加损失统计
-        running_policy_loss = 0
-        running_value_loss = 0
-        episode_policy_losses = []
-        episode_value_losses = []
-        
-        for episode in tqdm(range(num_episodes)):
+        episode = 0
+        while not stop_event.is_set() and episode < num_episodes:
             state = env.reset()
             done = False
             episode_data = []
             move_count = 0
-            episode_reward = 0
-            episode_captures = 0
-            episode_checks = 0
-            episode_crosses = 0
-            policy_losses = []
-            value_losses = []
             
             while not done and move_count < max_moves:
-                if visualize:
+                if vis:
                     vis.draw_board()
                     pygame.time.wait(100)
                     for event in pygame.event.get():
                         if event.type == pygame.QUIT:
-                            raise KeyboardInterrupt
+                            stop_event.set()
+                            break
                 
                 valid_moves = env.get_valid_moves()
                 if not valid_moves:
@@ -192,222 +149,159 @@ def train(num_episodes=1000, batch_size=64, visualize=True, pretrained_model=Non
                     
                 state_array = env._get_state()
                 
-                # 使用epsilon-greedy策略选择动作
                 if random.random() < epsilon:
                     action = random.choice(valid_moves)
                 else:
                     action = agent.select_action(state_array, valid_moves, temperature=1.0)
                 
                 next_state, reward, done = env.step(action)
-                
-                # 保存经验到episode_data
                 episode_data.append((state_array, action, reward))
-                episode_reward += reward
-                
-                # 统计当前回合的数据
-                if env.last_move:
-                    # 记录吃子
-                    if 'captured' in env.history[-1] and env.history[-1]['captured']:
-                        episode_captures += 1
-                        captured_piece = env.history[-1]['captured']
-                        stats['pieces_captured'][captured_piece] += 1
-                        stats['total_captures'] += 1
-                    
-                    # 记录过河
-                    to_row = env.last_move[1][0]
-                    if (to_row < 5 and env.current_player) or (to_row > 4 and not env.current_player):
-                        episode_crosses += 1
-                
-                # 记录将军
-                if env._is_in_check():
-                    episode_checks += 1
-                
                 state = next_state
                 move_count += 1
             
-            # 更新游戏结果统计
-            if env.is_game_over:
-                if env.winner is True:  # 红方胜
-                    stats['wins'] += 1
-                    stats['moves_to_win'].append(move_count)
-                elif env.winner is False:  # 黑方胜
-                    stats['losses'] += 1
-                else:  # 和棋
-                    stats['draws'] += 1
-            
-            # 更新统计
-            stats['checks_made'] += episode_checks
-            stats['river_crosses'] += episode_crosses
-            
-            # Log detailed metrics
-            writer.add_scalar('Game/Wins', stats['wins'], episode)
-            writer.add_scalar('Game/Losses', stats['losses'], episode)
-            writer.add_scalar('Game/Draws', stats['draws'], episode)
-            writer.add_scalar('Game/Win_Rate', stats['wins']/(episode+1), episode)
-            
-            writer.add_scalar('Actions/Captures_Per_Episode', episode_captures, episode)
-            writer.add_scalar('Actions/Checks_Per_Episode', episode_checks, episode)
-            writer.add_scalar('Actions/River_Crosses_Per_Episode', episode_crosses, episode)
-            
-            # Log piece-specific capture statistics
-            for piece, count in stats['pieces_captured'].items():
-                writer.add_scalar(f'Captures/{piece}_captured', count, episode)
-            
-            # Log average moves to win
-            if stats['moves_to_win']:
-                avg_moves_to_win = sum(stats['moves_to_win']) / len(stats['moves_to_win'])
-                writer.add_scalar('Game/Avg_Moves_To_Win', avg_moves_to_win, episode)
-            
-            # 衰减epsilon
+            experience_queue.put(episode_data)
             epsilon = max(epsilon_end, epsilon * epsilon_decay)
+            episode += 1
             
-            # 更新经验回放 - 现在episode_data不再为空
-            replay_buffer.extend(episode_data)
-            if len(replay_buffer) > max_buffer_size:
-                replay_buffer = replay_buffer[-max_buffer_size:]
+            # Report progress
+            if progress_queue is not None:
+                progress_queue.put(1)
             
-            # 增加训练频率
-            if len(replay_buffer) >= batch_size:
-                num_training_iterations = 8
-                for _ in range(num_training_iterations):
-                    batch_indices = np.random.choice(len(replay_buffer), batch_size, replace=False)
-                    batch_data = [replay_buffer[i] for i in batch_indices]
-                    p_loss, v_loss = optimize_model(model, optimizer, batch_data, agent)
-                    policy_losses.append(p_loss)
-                    value_losses.append(v_loss)
-            
-            # 计算本回合的平均损失
-            if policy_losses:  # 如果这回合有训练
-                avg_policy_loss = np.mean(policy_losses)
-                avg_value_loss = np.mean(value_losses)
-                episode_policy_losses.append(avg_policy_loss)
-                episode_value_losses.append(avg_value_loss)
-                
-                # 更新运行平均损失
-                running_policy_loss = 0.95 * running_policy_loss + 0.05 * avg_policy_loss if episode > 0 else avg_policy_loss
-                running_value_loss = 0.95 * running_value_loss + 0.05 * avg_value_loss if episode > 0 else avg_value_loss
-                
-                # Log loss metrics
-                writer.add_scalar('Loss/Policy_Loss', avg_policy_loss, episode)
-                writer.add_scalar('Loss/Value_Loss', avg_value_loss, episode)
-                writer.add_scalar('Loss/Running_Policy_Loss', running_policy_loss, episode)
-                writer.add_scalar('Loss/Running_Value_Loss', running_value_loss, episode)
-                
-                # 计算并记录最近100回合的平均损失
-                if len(episode_policy_losses) >= 100:
-                    avg_policy_loss_100 = np.mean(episode_policy_losses[-100:])
-                    avg_value_loss_100 = np.mean(episode_value_losses[-100:])
-                    writer.add_scalar('Loss/Average_Policy_Loss_100', avg_policy_loss_100, episode)
-                    writer.add_scalar('Loss/Average_Value_Loss_100', avg_value_loss_100, episode)
-            
-            # Update statistics
-            episode_rewards.append(episode_reward)
-            episode_lengths.append(move_count)
-            running_reward = 0.95 * running_reward + 0.05 * episode_reward if episode > 0 else episode_reward
-            
-            # Log exploration and training metrics
-            writer.add_scalar('Training/Epsilon', epsilon, episode)
-            writer.add_scalar('Training/Episode_Reward', episode_reward, episode)
-            writer.add_scalar('Training/Running_Reward', running_reward, episode)
-            writer.add_scalar('Training/Episode_Length', move_count, episode)
-            writer.add_scalar('Training/Buffer_Size', len(replay_buffer), episode)
-            
-            # Log periodic statistics
-            if episode % 100 == 0:
-                avg_reward = np.mean(episode_rewards[-100:]) if episode_rewards else 0
-                avg_length = np.mean(episode_lengths[-100:]) if episode_lengths else 0
-                
-                writer.add_scalar('Training/Average_Reward_100', avg_reward, episode)
-                writer.add_scalar('Training/Average_Length_100', avg_length, episode)
-                
-                # 添加详细日志
-                logger.info(f"Episode {episode}")
-                logger.info(f"Running reward: {running_reward:.2f}")
-                logger.info(f"Win rate: {stats['wins']/(episode+1):.2%}")
-                logger.info(f"Total captures: {stats['total_captures']}")
-                logger.info(f"Average moves to win: {avg_moves_to_win:.1f}" if stats['moves_to_win'] else "No wins yet")
-                logger.info(f"Buffer size: {len(replay_buffer)}")
-                logger.info(f"Epsilon: {epsilon:.3f}")
-                
-                # 添加损失信息到日志
-                if policy_losses:
-                    logger.info(f"Policy Loss: {running_policy_loss:.4f}")
-                    logger.info(f"Value Loss: {running_value_loss:.4f}")
-                    if len(episode_policy_losses) >= 100:
-                        logger.info(f"Avg Policy Loss (100 ep): {avg_policy_loss_100:.4f}")
-                        logger.info(f"Avg Value Loss (100 ep): {avg_value_loss_100:.4f}")
-            
-            if move_count >= max_moves:
-                logger.info(f"Episode {episode} reached move limit of {max_moves}")
-                # Create a temporary visualizer just for saving the board state
-                temp_vis = XiangqiVisualizer(env)
-                temp_vis.draw_board()
-                
-                # Save the board image to dir logs/images
-                save_dir = "logs/images"
-                os.makedirs(save_dir, exist_ok=True)
-                
-                save_path = os.path.join(save_dir, f"long_game_episode_{episode}.png")
-                pygame.image.save(temp_vis.screen, save_path)
-                logger.info(f"Saved board state to {save_path}")
-                
-                # Clean up the temporary visualizer
-                temp_vis.close()
-                if visualize:
-                    vis = XiangqiVisualizer(env)  # Recreate the main visualizer
-            
-            # Save periodic checkpoints (every 1000 episodes)
-            if episode > 0 and episode % 1000 == 0:
-                checkpoint_path = os.path.join(checkpoint_dir, f"model_episode_{episode}.pt")
-                torch.save({
-                    'episode': episode,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'running_reward': running_reward,
-                    'epsilon': epsilon,
-                    'stats': stats,
-                    'replay_buffer': replay_buffer,
-                }, checkpoint_path)
-                logger.info(f"Saved checkpoint to {checkpoint_path}")
-            
-            # Save best model based on running reward
-            if running_reward > best_reward:
-                best_reward = running_reward
-                best_model_path = os.path.join(checkpoint_dir, "best_reward_model.pt")
-                torch.save(model.state_dict(), best_model_path)
-                logger.info(f"New best reward model saved: {running_reward:.2f}")
-            
-            # Save best model based on win rate
-            current_win_rate = stats['wins']/(episode+1)
-            if current_win_rate > best_win_rate and episode > 100:
-                best_win_rate = current_win_rate
-                best_model_path = os.path.join(checkpoint_dir, "best_winrate_model.pt")
-                torch.save(model.state_dict(), best_model_path)
-                logger.info(f"New best win-rate model saved: {current_win_rate:.2%}")
-            
-    except KeyboardInterrupt:
-        # Save final model on interrupt
-        logger.info("\nTraining interrupted, saving checkpoint...")
-        interrupt_path = os.path.join(checkpoint_dir, "interrupted_model.pt")
-        torch.save({
-            'episode': episode,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'running_reward': running_reward,
-            'epsilon': epsilon,
-            'stats': stats,
-            'replay_buffer': replay_buffer,
-        }, interrupt_path)
-        logger.info(f"Saved interrupt checkpoint to {interrupt_path}")
     finally:
-        # Save final model
+        if vis:
+            vis.close()
+
+def train_model(model, experience_queue, stop_event, batch_size=64, save_interval=1000):
+    """Process function to train the model using collected experience"""
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = model.to(device)
+    optimizer = optim.Adam(model.parameters(), lr=0.0003)
+    
+    log_dir = "logs/tensorboard"
+    os.makedirs(log_dir, exist_ok=True)
+    writer = SummaryWriter(log_dir)
+    
+    checkpoint_dir = "logs/checkpoints"
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    
+    replay_buffer = deque(maxlen=100000)
+    running_reward = 0
+    episode = 0
+    
+    try:
+        while not stop_event.is_set():
+            try:
+                while True:
+                    episode_data = experience_queue.get_nowait()
+                    replay_buffer.extend(episode_data)
+                    episode += 1
+                    
+                    if len(replay_buffer) >= batch_size:
+                        batch_indices = np.random.choice(len(replay_buffer), batch_size, replace=False)
+                        batch_data = [replay_buffer[i] for i in batch_indices]
+                        
+                        policy_loss, value_loss = optimize_model(model, optimizer, batch_data, XiangqiAgent(model))
+                        
+                        writer.add_scalar('Loss/Policy_Loss', policy_loss, episode)
+                        writer.add_scalar('Loss/Value_Loss', value_loss, episode)
+                    
+                    if episode % save_interval == 0:
+                        checkpoint_path = os.path.join(checkpoint_dir, f"model_episode_{episode}.pt")
+                        torch.save({
+                            'episode': episode,
+                            'model_state_dict': model.state_dict(),
+                            'optimizer_state_dict': optimizer.state_dict(),
+                        }, checkpoint_path)
+                        logger.info(f"Saved checkpoint to {checkpoint_path}")
+                    
+            except queue.Empty:
+                time.sleep(0.1)
+                
+    except KeyboardInterrupt:
+        logger.info("Training interrupted")
+    finally:
         final_path = os.path.join(checkpoint_dir, "final_model.pt")
         torch.save(model.state_dict(), final_path)
         logger.info(f"Saved final model to {final_path}")
-        
-        if visualize:
-            vis.close()
         writer.close()
+
+def train(num_episodes=1000, num_processes=4, batch_size=64, visualize=True, pretrained_model=None, max_moves=2000):
+    """Main training function using multiple processes"""
+    if pretrained_model:
+        model = pretrained_model
+    else:
+        model = XiangqiHybridNet()
+    model.share_memory()
+    
+    experience_queue = Queue()
+    stop_event = Event()
+    progress_queue = Queue()
+    
+    # Create a single progress bar for overall training
+    pbar = tqdm(total=num_episodes, desc='Training Progress', 
+                unit='episodes', ncols=100,
+                postfix={'buffer': 0, 'epsilon': 1.0},
+                position=0,  # Fix position to 0
+                leave=True,  # Keep the progress bar after completion
+                dynamic_ncols=True,  # Adapt to terminal width
+                mininterval=0.1,  # Minimum progress display update interval
+                maxinterval=1.0)  # Maximum progress display update interval
+    
+    # Start training process
+    trainer = mp.Process(target=train_model, 
+                        args=(model, experience_queue, stop_event, batch_size))
+    trainer.start()
+    
+    # Start game playing processes
+    players = []
+    episodes_per_process = num_episodes // num_processes
+    for rank in range(num_processes):
+        process_visualize = visualize and rank == 0
+        p = mp.Process(target=play_games,
+                      args=(rank, model, experience_queue, stop_event, 
+                            episodes_per_process, max_moves, process_visualize,
+                            progress_queue))
+        p.start()
+        players.append(p)
+    
+    try:
+        # Monitor progress
+        completed_episodes = 0
+        while completed_episodes < num_episodes:
+            try:
+                # Update progress bar for each completed episode
+                progress = progress_queue.get(timeout=1.0)
+                completed_episodes += progress
+                
+                # Update postfix info periodically
+                if completed_episodes % 10 == 0:
+                    epsilon = max(0.1, 1.0 * (1 - completed_episodes/num_episodes))
+                    pbar.set_postfix_str(
+                        f"completed={completed_episodes}/{num_episodes}, epsilon={epsilon:.2f}",
+                        refresh=False  # Don't refresh immediately
+                    )
+                
+                pbar.update(progress)  # This will refresh the display
+                
+            except queue.Empty:
+                if all(not p.is_alive() for p in players):
+                    break
+                continue
+        
+        for p in players:
+            p.join()
+        
+        stop_event.set()
+        trainer.join()
+        
+    except KeyboardInterrupt:
+        logger.info("Training interrupted")
+        stop_event.set()
+        for p in players:
+            p.terminate()
+        trainer.terminate()
+    finally:
+        pbar.close()
     
     return model
 
@@ -445,7 +339,15 @@ if __name__ == "__main__":
     parser.add_argument('--visualize', action='store_true', help='Whether to visualize training')
     parser.add_argument('--episodes', type=int, default=64000, help='Number of episodes to train')
     parser.add_argument('--max-moves', type=int, default=1000, help='Maximum moves per game')
+    parser.add_argument('--processes', type=int, 
+                       default=max(1, multiprocessing.cpu_count() // 2),
+                       help='Number of game playing processes (default: half of CPU cores)')
     args = parser.parse_args()
+
+    # Enable multiprocessing support for CUDA
+    mp.set_start_method('spawn')
+
+    logger.info(f"Using {args.processes} processes for training")
 
     model = XiangqiHybridNet()
     
@@ -462,6 +364,9 @@ if __name__ == "__main__":
         logger.info("Skipping pretraining. Starting with untrained model...")
         pretrained_model = model
     
-    # Then fine-tune with reinforcement learning
-    train(num_episodes=args.episodes, visualize=args.visualize, 
-          pretrained_model=pretrained_model, max_moves=args.max_moves)
+    # Then fine-tune with reinforcement learning using multiple processes
+    train(num_episodes=args.episodes, 
+          num_processes=args.processes,
+          visualize=args.visualize, 
+          pretrained_model=pretrained_model if args.pretrain else model,
+          max_moves=args.max_moves)
