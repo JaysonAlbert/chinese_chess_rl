@@ -1,50 +1,51 @@
 import torch
 import numpy as np
-from model import XiangqiHybridNet
 
 class XiangqiAgent:
-    def __init__(self, model=None):
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = model if model is not None else XiangqiHybridNet().to(self.device)
-        self.model.eval()
+    def __init__(self, model):
+        self.model = model
     
     def select_action(self, state, valid_moves, temperature=1.0):
-        """Select an action from valid moves using the model's policy"""
-        if isinstance(state, np.ndarray):
-            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
-        else:
-            state_tensor = state.unsqueeze(0)  # Already a tensor
-        
+        """Select an action using the model's policy"""
         with torch.no_grad():
+            # Convert state to tensor
+            state_tensor = torch.FloatTensor(state).unsqueeze(0)
+            if torch.cuda.is_available():
+                state_tensor = state_tensor.cuda()
+            
+            # Get policy from model
             policy, _ = self.model(state_tensor)
-            policy = policy.exp().cpu().numpy()[0]
+            policy = policy.squeeze(0)
             
-            # Use pre-allocated arrays for better performance
-            valid_move_mask = np.zeros_like(policy)
+            # Convert valid moves to indices
+            valid_indices = [self._move_to_index(move) for move in valid_moves]
+            
+            # Mask invalid moves
+            mask = torch.zeros_like(policy)
+            mask[valid_indices] = 1
+            policy = policy * mask
+            
+            # Apply temperature
+            if temperature != 1.0:
+                policy = torch.pow(policy, 1.0/temperature)
+            
+            # Normalize probabilities
+            policy = policy / policy.sum()
+            
+            # Sample action
+            action_idx = torch.multinomial(policy, 1).item()
+            
+            # Convert back to board coordinates
             for move in valid_moves:
-                valid_move_mask[self._move_to_index(move)] = 1
+                if self._move_to_index(move) == action_idx:
+                    return move
             
-            policy *= valid_move_mask
-            policy /= policy.sum() + 1e-10  # Add small epsilon to avoid division by zero
-            
-            if temperature == 0:
-                move_idx = policy.argmax()
-            else:
-                policy = np.power(policy, 1/temperature)
-                policy /= policy.sum() + 1e-10
-                move_idx = np.random.choice(len(policy), p=policy)
-            
-            return self._index_to_move(move_idx)
+            # Fallback to first valid move if something goes wrong
+            return valid_moves[0]
     
     def _move_to_index(self, move):
-        """Convert move coordinates to flat index"""
+        """Convert a move (from_pos, to_pos) to a single index"""
         from_pos, to_pos = move
-        return from_pos[0] * 9 * 90 + from_pos[1] * 90 + to_pos[0] * 9 + to_pos[1]
-    
-    def _index_to_move(self, index):
-        """Convert flat index to move coordinates"""
-        from_row = index // (9 * 90)
-        from_col = (index % (9 * 90)) // 90
-        to_row = (index % 90) // 9
-        to_col = index % 9
-        return ((from_row, from_col), (to_row, to_col)) 
+        from_idx = from_pos[0] * 9 + from_pos[1]
+        to_idx = to_pos[0] * 9 + to_pos[1]
+        return from_idx * 90 + to_idx 

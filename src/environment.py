@@ -562,198 +562,116 @@ class XiangqiEnv:
         return True
     
     def _is_in_check(self):
-        """检查当前玩家是否被将军"""
-        # 找到当前玩家的将/帅
+        """Check if current player's king is in check"""
+        return self.is_king_in_check(self.current_player)
+
+    def _is_checkmate(self):
+        """Check if current player is in checkmate"""
+        # First check if king is in check
+        if not self._is_in_check():
+            return False
+        
+        # Try all possible moves to see if check can be escaped
+        original_player = self.current_player
+        for move in self.get_valid_moves():
+            # Save board state
+            from_pos, to_pos = move
+            from_piece = self.board[from_pos[0]][from_pos[1]]
+            to_piece = self.board[to_pos[0]][to_pos[1]]
+            
+            # Try move
+            self.board[to_pos[0]][to_pos[1]] = from_piece
+            self.board[from_pos[0]][from_pos[1]] = None
+            
+            # Check if still in check
+            still_in_check = self._is_in_check()
+            
+            # Restore board state
+            self.board[from_pos[0]][from_pos[1]] = from_piece
+            self.board[to_pos[0]][to_pos[1]] = to_piece
+            
+            if not still_in_check:
+                return False
+        
+        return True
+
+    def _is_stalemate(self):
+        """Check if current player is in stalemate"""
+        return not self._is_in_check() and not self.get_valid_moves()
+
+    def step(self, action):
+        """Execute one step in the environment"""
+        from_pos, to_pos = action
+        from_row, from_col = from_pos
+        to_row, to_col = to_pos
+        
+        # Get the moving piece and validate it belongs to current player
+        piece = self.board[from_row][from_col]
+        if not piece or piece.is_red != self.current_player:
+            return self._get_state(), -1, False, {'winner': None}
+        
+        # Store the target piece before moving
+        target_piece = self.board[to_row][to_col]
+        
+        # Make the move
+        self.board[to_row][to_col] = piece
+        self.board[from_row][from_col] = None
+        
+        # Update current player
+        self.current_player = not self.current_player
+        
+        # Check win conditions
+        info = {'winner': None}
+        done = False
+        
+        # 1. Check if a king was captured
+        if target_piece and target_piece.piece_type == 'k':
+            done = True
+            info['winner'] = not self.current_player  # Previous player wins
+        
+        # 2. Check if current player is in checkmate
+        elif self._is_checkmate():
+            done = True
+            info['winner'] = not self.current_player  # Previous player wins
+        
+        # 3. Check if it's a stalemate
+        elif self._is_stalemate():
+            done = True
+            info['winner'] = None  # Draw
+        
+        # Calculate reward
+        reward = 0
+        if done and info['winner'] is not None:
+            reward = 1 if info['winner'] == (not self.current_player) else -1
+        
+        return self._get_state(), reward, done, info
+
+    def is_king_in_check(self, is_red):
+        """Check if the king of the given color is in check"""
+        # Find king position
         king_pos = None
         for i in range(10):
             for j in range(9):
                 piece = self.board[i][j]
-                if piece and piece.piece_type == 'k' and piece.is_red == self.current_player:
+                if piece and piece.piece_type == 'k' and piece.is_red == is_red:
                     king_pos = (i, j)
                     break
             if king_pos:
                 break
         
         if not king_pos:
-            return False  # 如果找不到将/帅，返回False
+            return True  # King is captured
         
-        # 检查对手的所有棋子是否可以攻击到将/帅
+        # Check if any opponent piece can capture the king
         for i in range(10):
             for j in range(9):
                 piece = self.board[i][j]
-                if piece and piece.is_red != self.current_player:  # 对手的棋子
-                    valid_moves = piece.get_moves((i, j), self.board)
-                    for _, to_pos in valid_moves:
-                        if to_pos == king_pos:  # 可以攻击到将/帅
-                            return True
+                if piece and piece.is_red != is_red:
+                    moves = piece.get_moves((i, j), self.board)
+                    if king_pos in [move[1] for move in moves]:
+                        return True
         
         return False
-
-    def _is_checkmate(self):
-        """检查是否将死"""
-        # 首先检查是否被将军
-        if not self._is_in_check():
-            return False
-        
-        # 获取所有可能的移动
-        valid_moves = self.get_valid_moves()
-        if not valid_moves:
-            return True  # 无法移动，被将死
-        
-        # 尝试每一个可能的移动，看是否能解除将军
-        for move in valid_moves:
-            # 保存当前状态
-            from_pos, to_pos = move
-            from_row, from_col = from_pos
-            to_row, to_col = to_pos
-            moving_piece = self.board[from_row][from_col]
-            captured_piece = self.board[to_row][to_col]
-            
-            # 尝试移动
-            self.board[to_row][to_col] = moving_piece
-            self.board[from_row][from_col] = None
-            
-            # 检查是否仍然被将军
-            still_in_check = self._is_in_check()
-            
-            # 恢复状态
-            self.board[from_row][from_col] = moving_piece
-            self.board[to_row][to_col] = captured_piece
-            
-            if not still_in_check:
-                return False  # 找到一个可以解除将军的移动
-        
-        return True  # 所有移动都无法解除将军，确实被将死
-
-    def _is_stalemate(self):
-        """检查是否和棋"""
-        # 如果被将军但没被将死，不是和棋
-        if self._is_in_check():
-            return False
-        
-        # 如果没有合法移动，是和棋
-        valid_moves = self.get_valid_moves()
-        return len(valid_moves) == 0
-
-    def step(self, action):
-        """执行移动并返回新状态"""
-        from_pos, to_pos = action
-        from_row, from_col = from_pos
-        to_row, to_col = to_pos
-        
-        # 获取棋子并检查是否属于当前玩家
-        piece = self.board[from_row][from_col]
-        if not piece or piece.is_red != self.current_player:
-            return self._get_state(), -1, True
-            
-        # Check if move is valid for this piece
-        valid_moves = piece.get_moves(from_pos, self.board)
-        if action not in valid_moves:
-            return self._get_state(), -1, True
-        
-        # Check if capturing opponent's general/king
-        captured_piece = self.board[to_row][to_col]
-        is_winning_move = captured_piece and captured_piece.piece_type == 'k'
-        
-        # Move the piece
-        self.board[to_row][to_col] = piece
-        self.board[from_row][from_col] = None
-        
-        # Switch players
-        self.current_player = not self.current_player
-        
-        # Check if next player has any valid moves
-        next_valid_moves = self.get_valid_moves()
-        is_checkmate = len(next_valid_moves) == 0
-        
-        # Game is over if king is captured or checkmate
-        done = is_winning_move or is_checkmate
-        
-        # 调整奖励尺度
-        piece_values = {
-            'p': 1,   # 兵/卒
-            'c': 4,   # 炮
-            'h': 4,   # 马
-            'r': 9,   # 车
-            'a': 2,   # 士
-            'e': 2,   # 象
-            'k': 100  # 将/帅
-        }
-        
-        reward = 0
-        # 1. 吃子奖励 - 增加基础奖励
-        if captured_piece:
-            reward += piece_values.get(captured_piece.piece_type, 0) * 0.3  # 从0.1增加到0.3
-        
-        # 2. 位置奖励 - 增加中心控制奖励
-        central_positions = [(4, 1), (4, 2), (4, 7), (4, 8)]
-        if (to_row, to_col) in central_positions:
-            reward += 0.2  # 从0.05增加到0.2
-        
-        # 3. 威胁奖励 - 增加威胁奖励
-        threatened_pieces = self._get_threatened_pieces((to_row, to_col))
-        for piece in threatened_pieces:
-            reward += piece_values.get(piece.piece_type, 0) * 0.15  # 从0.05增加到0.15
-        
-        # 4. 保护奖励 - 增加保护奖励
-        protected_pieces = self._get_protected_pieces((to_row, to_col))
-        for piece in protected_pieces:
-            reward += piece_values.get(piece.piece_type, 0) * 0.1  # 从0.02增加到0.1
-        
-        # 5. 游戏结束奖励 - 调整胜负奖励
-        if is_checkmate and is_winning_move:
-            reward = 5.0  # 从1.0增加到5.0
-        elif is_checkmate:
-            reward = -3.0  # 从-1.0改为-3.0，减少惩罚
-        elif self._is_in_check():
-            reward += 0.5  # 从0.1增加到0.5
-        elif self._is_stalemate():
-            reward = -0.5  # 从0改为-0.5，轻微惩罚和棋
-        
-        # 6. 惩罚过长的游戏 - 减少惩罚力度
-        if hasattr(self, 'move_count'):
-            self.move_count += 1
-        else:
-            self.move_count = 1
-        
-        if self.move_count > 200:
-            reward -= 0.0005 * (self.move_count - 200)  # 从0.001减少到0.0005
-        
-        # 7. 添加移动有效性奖励
-        if action in valid_moves:
-            reward += 0.1  # 奖励有效移动
-        
-        # 8. 添加进攻性奖励
-        if to_row < 5 and self.current_player:  # 红方过河
-            reward += 0.2
-        elif to_row > 4 and not self.current_player:  # 黑方过河
-            reward += 0.2
-        
-        # 记录移动历史
-        self.last_move = action
-        self.history.append({
-            'action': action,
-            'piece': piece.piece_type,
-            'is_red': piece.is_red,
-            'captured': captured_piece.piece_type if captured_piece else None
-        })
-        
-        # 如果有子被吃，记录到被吃子列表
-        if captured_piece:
-            self.captured_pieces[captured_piece.is_red].append(captured_piece)
-        
-        # 更新游戏结果状态
-        if is_checkmate and is_winning_move:
-            self.is_game_over = True
-            self.winner = self.current_player
-        elif is_checkmate:
-            self.is_game_over = True
-            self.winner = not self.current_player
-        elif self._is_stalemate():
-            self.is_game_over = True
-            self.winner = None
-        
-        return self._get_state(), reward, done
 
     def calculate_move(self, move, is_red):
         """Convert Chinese notation move to board positions

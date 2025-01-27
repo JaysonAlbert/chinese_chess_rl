@@ -5,10 +5,10 @@ from tqdm import tqdm
 import pygame
 import logging
 import numpy as np
-from environment import XiangqiEnv
-from agent import XiangqiAgent
-from model import XiangqiHybridNet
-from visualize import XiangqiVisualizer
+from src.environment import XiangqiEnv
+from src.agent import XiangqiAgent
+from src.model import XiangqiHybridNet
+from src.visualize import XiangqiVisualizer
 import pandas as pd
 import os
 from torch.utils.tensorboard import SummaryWriter

@@ -3,84 +3,50 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class XiangqiHybridNet(nn.Module):
-    def __init__(self, channels=256, num_attention_heads=8):
+    def __init__(self):
         super(XiangqiHybridNet, self).__init__()
         
-        # Use torch.nn.LazyLinear for automatic input size inference
-        self.conv_layers = nn.Sequential(
-            nn.Conv2d(14, 64, 3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),  # Use inplace operations
-            nn.Conv2d(64, 128, 3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(128, channels, 3, padding=1),
-            nn.BatchNorm2d(channels),
-            nn.ReLU(inplace=True)
-        )
+        # Input channels: 14 (7 piece types * 2 colors)
+        # Board size: 10 x 9
         
-        # Attention mechanism
-        self.attention = nn.MultiheadAttention(
-            embed_dim=channels,
-            num_heads=num_attention_heads,
-            batch_first=True
-        )
+        # Convolutional layers
+        self.conv1 = nn.Conv2d(14, 64, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
+        self.conv3 = nn.Conv2d(128, 256, kernel_size=3, padding=1)
         
-        # Position encoding for attention
-        self.register_buffer('pos_encoding', torch.randn(1, 90, channels))  # 90 = 9x10 board
+        # Batch normalization layers
+        self.bn1 = nn.BatchNorm2d(64)
+        self.bn2 = nn.BatchNorm2d(128)
+        self.bn3 = nn.BatchNorm2d(256)
         
         # Policy head
-        self.policy_head = nn.Sequential(
-            nn.Conv2d(channels, 32, 1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.Flatten(),
-            nn.Linear(32 * 90, 1024),
-            nn.ReLU(),
-            nn.Linear(1024, 90 * 90),  # All possible moves
-            nn.LogSoftmax(dim=1)
-        )
+        self.policy_conv = nn.Conv2d(256, 32, kernel_size=1)
+        self.policy_bn = nn.BatchNorm2d(32)
+        self.policy_fc = nn.Linear(32 * 10 * 9, 90 * 90)  # All possible moves
         
         # Value head
-        self.value_head = nn.Sequential(
-            nn.Conv2d(channels, 32, 1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.Flatten(),
-            nn.Linear(32 * 90, 256),
-            nn.ReLU(),
-            nn.Linear(256, 1),
-            nn.Tanh()
-        )
+        self.value_conv = nn.Conv2d(256, 32, kernel_size=1)
+        self.value_bn = nn.BatchNorm2d(32)
+        self.value_fc1 = nn.Linear(32 * 10 * 9, 256)
+        self.value_fc2 = nn.Linear(256, 1)
     
     def forward(self, x):
-        batch_size = x.size(0)
+        # Shared layers
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = F.relu(self.bn3(self.conv3(x)))
         
-        # CNN feature extraction
-        conv_features = self.conv_layers(x)  # Shape: [batch, channels, 10, 9]
+        # Policy head
+        policy = F.relu(self.policy_bn(self.policy_conv(x)))
+        policy = policy.view(-1, 32 * 10 * 9)
+        policy = self.policy_fc(policy)
+        policy = F.log_softmax(policy, dim=1)
         
-        # Prepare for attention
-        features = conv_features.view(batch_size, conv_features.size(1), -1)  # [batch, channels, 90]
-        features = features.permute(0, 2, 1)  # [batch, 90, channels]
-        
-        # Add positional encoding
-        features = features + self.pos_encoding
-        
-        # Self-attention
-        attended_features, _ = self.attention(features, features, features)
-        
-        # Reshape back to spatial form
-        attended_features = attended_features.permute(0, 2, 1)  # [batch, channels, 90]
-        attended_features = attended_features.view(batch_size, -1, 10, 9)
-        
-        # Combine CNN and attention features
-        final_features = attended_features + conv_features  # Residual connection
-        
-        # Policy output
-        policy = self.policy_head(final_features)
-        
-        # Value output
-        value = self.value_head(final_features)
+        # Value head
+        value = F.relu(self.value_bn(self.value_conv(x)))
+        value = value.view(-1, 32 * 10 * 9)
+        value = F.relu(self.value_fc1(value))
+        value = torch.tanh(self.value_fc2(value))
         
         return policy, value
 

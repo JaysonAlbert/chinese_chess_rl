@@ -44,12 +44,13 @@ def get_system_font():
     return None
         
 class XiangqiVisualizer:
-    def __init__(self, env, animation_duration=1000):
+    def __init__(self, env, animation_duration=1000, debug=False):
         """
         Initialize the visualizer
         Args:
             env: The game environment
             animation_duration: Duration of move animations in milliseconds (default: 1000)
+            debug: Whether to draw intersection points for debugging (default: False)
         """
         self.env = env
         self.animation_duration = animation_duration
@@ -95,6 +96,7 @@ class XiangqiVisualizer:
         self.move_start_time = 0
         self.MOVE_DURATION = 1000  # 增加到1秒 (原来是500毫秒)
         self.MOVE_INTERVAL = 1000  # 每步移动之间的间隔时间(1秒)
+        self.debug = debug
     
     def close(self):
         """Clean up pygame resources"""
@@ -182,10 +184,66 @@ class XiangqiVisualizer:
         # Save the image
         pygame.image.save(surface, filepath)
     
+    def get_board_position(self, mouse_pos):
+        """Convert mouse position to board coordinates"""
+        x, y = mouse_pos
+        
+        # Calculate the size of clickable area around each intersection
+        click_area = self.square_size // 2
+        
+        # Calculate board boundaries
+        board_left = self.margin
+        board_top = self.margin
+        
+        # Adjust position relative to board
+        rel_x = x - board_left
+        rel_y = y - board_top
+        
+        # Calculate nearest intersection
+        col = round(rel_x / self.square_size)
+        row = round(rel_y / self.square_size)
+        
+        # Check if click is close enough to an intersection
+        x_dist = abs(rel_x - col * self.square_size)
+        y_dist = abs(rel_y - row * self.square_size)
+        
+        if (x_dist <= click_area and y_dist <= click_area and 
+            0 <= row < 10 and 0 <= col < 9):
+            return row, col
+        
+        return None
+
+    def highlight_selected(self, pos):
+        """Highlight the selected piece"""
+        if pos:
+            row, col = pos
+            x = self.margin + col * self.square_size
+            y = self.margin + row * self.square_size
+            
+            # Draw a semi-transparent green rectangle
+            s = pygame.Surface((self.square_size - 4, self.square_size - 4), pygame.SRCALPHA)
+            s.fill((0, 255, 0, 128))  # Green with alpha
+            rect = s.get_rect(center=(x, y))
+            self.screen.blit(s, rect)
+
+    def highlight_valid_moves(self, valid_moves):
+        """Highlight valid move destinations"""
+        for _, to_pos in valid_moves:
+            row, col = to_pos
+            x = self.margin + col * self.square_size
+            y = self.margin + row * self.square_size
+            
+            # Draw a semi-transparent yellow circle
+            s = pygame.Surface((self.square_size - 4, self.square_size - 4), pygame.SRCALPHA)
+            pygame.draw.circle(s, (255, 255, 0, 128), (s.get_width()//2, s.get_height()//2), s.get_width()//2)
+            rect = s.get_rect(center=(x, y))
+            self.screen.blit(s, rect)
+
     def draw_board(self, selected_pos=None, valid_moves=None):
+        """Draw the board with optional highlights for selected piece and valid moves"""
         self.screen.fill(self.BACKGROUND)
         
-        # Calculate board area with extra space for numbers
+        # Calculate board area
         board_left = self.margin
         board_right = board_left + 8 * self.square_size
         board_top = self.margin
@@ -195,8 +253,8 @@ class XiangqiVisualizer:
         for i in range(9):
             num = self.chinese_numbers[9 - i]  # Right to left for red
             text = self.number_font.render(num, True, self.RED)
-            x = board_left + i * self.square_size  # Align with vertical lines
-            y = board_bottom + 44  # Move numbers down a bit
+            x = board_left + i * self.square_size
+            y = board_bottom + 44
             text_rect = text.get_rect(center=(x, y))
             self.screen.blit(text, text_rect)
         
@@ -204,8 +262,8 @@ class XiangqiVisualizer:
         for i in range(9):
             num = str(i + 1)  # Left to right for black
             text = self.number_font.render(num, True, self.BLACK)
-            x = board_left + i * self.square_size  # Align with vertical lines
-            y = board_top - 45  # Move numbers up a bit
+            x = board_left + i * self.square_size
+            y = board_top - 45
             text_rect = text.get_rect(center=(x, y))
             self.screen.blit(text, text_rect)
         
@@ -245,58 +303,46 @@ class XiangqiVisualizer:
         text_rect = text.get_rect(center=(6.5 * self.square_size + self.margin, river_y))
         self.screen.blit(text, text_rect)
         
-        # Draw pieces on intersections
+        # Highlight valid moves first (so pieces appear on top)
+        if valid_moves:
+            self.highlight_valid_moves(valid_moves)
+        
+        # Draw pieces
         for i in range(10):
             for j in range(9):
                 piece = self.env.board[i][j]
                 if piece:
-                    # Calculate intersection position
-                    x = board_left + j * self.square_size  # Align with vertical lines
-                    y = board_top + i * self.square_size   # Align with horizontal lines
+                    # Calculate exact intersection position
+                    x = self.margin + j * self.square_size
+                    y = self.margin + i * self.square_size
                     
+                    # Draw piece centered on intersection
                     img = self.pieces_img[(piece.piece_type, piece.is_red)]
-                    img_rect = img.get_rect(center=(x, y))  # Center on intersection
+                    img_rect = img.get_rect(center=(x, y))
                     self.screen.blit(img, img_rect)
         
-        # Highlight selected piece (also adjust for intersection)
-        if selected_pos is not None:
-            x = board_left + selected_pos[1] * self.square_size
-            y = board_top + selected_pos[0] * self.square_size
-            highlight_size = self.square_size - 10
-            pygame.draw.rect(self.screen, (0, 255, 0),
-                           (x - highlight_size//2, y - highlight_size//2,
-                            highlight_size, highlight_size), 2)
+        # Highlight selected piece last (so it appears on top)
+        if selected_pos:
+            self.highlight_selected(selected_pos)
         
-        # Highlight valid moves (also adjust for intersection)
-        if valid_moves:
-            for _, to_pos in valid_moves:
-                x = board_left + to_pos[1] * self.square_size
-                y = board_top + to_pos[0] * self.square_size
-                s = pygame.Surface((self.square_size - 10, self.square_size - 10))
-                s.set_alpha(128)
-                s.fill((0, 255, 0))
-                s_rect = s.get_rect(center=(x, y))
-                self.screen.blit(s, s_rect)
-        
-        # Show current player text lower but still within screen
+        # Show current player
         current_player = "红方" if self.env.current_player else "黑方"
-        text = self.font.render(f"当前玩家: {current_player}", True, self.RED if self.env.current_player else self.BLACK)
-        text_rect = text.get_rect(center=(self.width//2, self.height - self.margin + 25))  # Position closer to bottom
+        text = self.font.render(f"当前玩家: {current_player}", True, 
+                               self.RED if self.env.current_player else self.BLACK)
+        text_rect = text.get_rect(center=(self.width//2, self.height - self.margin + 25))
         self.screen.blit(text, text_rect)
         
-        # 绘制最后一步移动的效果
+        # Show last move if any
         if self.last_move:
-            from_pos, to_pos = self.last_move
-            current_time = pygame.time.get_ticks()
-            elapsed = current_time - self.move_start_time
-            
-            if elapsed < self.MOVE_DURATION:
-                # 绘制移动动画
-                progress = elapsed / self.MOVE_DURATION
-                self._draw_move_animation(from_pos, to_pos, progress)
-            else:
-                # 动画结束后显示静态效果
-                self._draw_move_effects(from_pos, to_pos)
+            self._draw_move_effects(*self.last_move)
+        
+        # Debug: draw intersection points
+        if self.debug:
+            for i in range(10):
+                for j in range(9):
+                    x = self.margin + j * self.square_size
+                    y = self.margin + i * self.square_size
+                    pygame.draw.circle(self.screen, (255, 0, 0), (x, y), 2)
         
         pygame.display.flip()
 
@@ -326,52 +372,33 @@ class XiangqiVisualizer:
         # 绘制移动轨迹线
         pygame.draw.line(self.screen, self.MOVE_LINE, (from_x, from_y), (to_x, to_y), 2)
 
-    def _draw_move_animation(self, from_pos, to_pos, progress):
-        """绘制移动动画"""
-        from_row, from_col = from_pos
-        to_row, to_col = to_pos
-        
-        # 计算起点和终点的实际坐标
-        from_x = self.margin + from_col * self.square_size
-        from_y = self.margin + from_row * self.square_size
-        to_x = self.margin + to_col * self.square_size
-        to_y = self.margin + to_row * self.square_size
-        
-        # 计算当前位置
-        current_x = from_x + (to_x - from_x) * progress
-        current_y = from_y + (to_y - from_y) * progress
-        
-        # 绘制移动轨迹
-        pygame.draw.line(self.screen, self.MOVE_LINE, (from_x, from_y), (to_x, to_y), 2)
-        
-        # 绘制起点和终点高亮
-        self._draw_move_effects(from_pos, to_pos)
-        
-        # 绘制移动中的棋子
-        piece = self.pieces_img[(self.last_piece_type, self.last_piece_is_red)]
-        piece_rect = piece.get_rect(center=(current_x, current_y))
-        self.screen.blit(piece, piece_rect)
-
-    def animate_move(self):
-        """
-        Animate a piece movement.
-        Returns:
-            False if animation was interrupted
-        """
+    def animate_move(self, from_pos, to_pos, duration=500):
+        """Animate piece movement"""
         start_time = pygame.time.get_ticks()
+        piece = self.env.board[from_pos[0]][from_pos[1]]
+        if not piece:
+            return
         
-        while pygame.time.get_ticks() - start_time < self.animation_duration:
-            self.draw_board()
-            pygame.display.flip()
+        while pygame.time.get_ticks() - start_time < duration:
+            # Calculate current position
+            progress = (pygame.time.get_ticks() - start_time) / duration
+            progress = min(1.0, progress)  # Clamp to 1.0
             
-            # Handle pygame events
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    self.close()
-                    return False
-                elif event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_ESCAPE:
-                        self.close()
-                        return False
+            current_x = self.margin + (from_pos[1] + (to_pos[1] - from_pos[1]) * progress) * self.square_size
+            current_y = self.margin + (from_pos[0] + (to_pos[0] - from_pos[0]) * progress) * self.square_size
+            
+            # Draw board without the moving piece
+            self.env.board[from_pos[0]][from_pos[1]] = None
+            self.draw_board()
+            self.env.board[from_pos[0]][from_pos[1]] = piece
+            
+            # Draw the moving piece
+            img = self.pieces_img[(piece.piece_type, piece.is_red)]
+            img_rect = img.get_rect(center=(current_x, current_y))
+            self.screen.blit(img, img_rect)
+            
+            pygame.display.flip()
+            pygame.time.wait(10)  # Control animation speed
         
-        return True
+        # Update last move for highlighting
+        self.last_move = (from_pos, to_pos)
