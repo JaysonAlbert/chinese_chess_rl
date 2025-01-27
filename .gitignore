@@ -67,3 +67,4 @@ resources/parsed_games/*.json
 resources/games/*.txt
 checkpoints/*
 logs
+*.csv

@@ -1,6 +1,8 @@
 import sys
 import os
 import platform
+import time
+import pandas as pd
 # Add project root directory to Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -10,52 +12,136 @@ from src.environment import XiangqiEnv, Piece
 import json
 from src.visualize import XiangqiVisualizer
 
-def play_game():
+def load_games(csv_path):
+    """Load games from CSV file"""
+    if not os.path.exists(csv_path):
+        print(f"Error: CSV file not found at {csv_path}")
+        return None
+    
+    try:
+        df = pd.read_csv(csv_path)
+        print(f"Loaded {len(df)} games from {csv_path}")
+        return df
+    except Exception as e:
+        print(f"Error loading CSV file: {e}")
+        return None
+
+def play_game(moves_str, delay=1.0, visualize=True):
+    """Play through a single game"""
     env = XiangqiEnv()
-    visualizer = XiangqiVisualizer(env)
-    selected_pos = None
-    valid_moves = []
+    if visualize:
+        vis = XiangqiVisualizer(env, animation_duration=int(delay * 1000))  # Convert delay to milliseconds
+        pygame.init()  # Initialize pygame
+        # Bring game window to front
+        pygame.display.set_mode((vis.width, vis.height), pygame.NOFRAME | pygame.SHOWN)
+        pygame.display.flip()
     
-    running = True
-    while running:
-        visualizer.draw_board(selected_pos, valid_moves)
-        
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
+    moves = moves_str.split()
+    print(f"\nPlaying game with {len(moves)} moves...")
+    
+    try:
+        for i, move_str in enumerate(moves, 1):
+            # Parse move string (format: "from_row,from_col,to_row,to_col")
+            from_row, from_col, to_row, to_col = map(int, move_str.split(','))
+            from_pos = (from_row, from_col)
+            to_pos = (to_row, to_col)
             
-            elif event.type == pygame.MOUSEBUTTONDOWN:
-                x, y = event.pos
-                col = x // visualizer.square_size
-                row = y // visualizer.square_size
+            # Get piece at from_pos
+            piece = env.board[from_row][from_col]
+            if piece:
+                piece_type = piece.piece_type
+                is_red = piece.is_red
+                print(f"Move {i}: {'Red' if is_red else 'Black'} {piece_type} from {from_pos} to {to_pos}")
+            
+            if visualize:
+                # Set up animation
+                vis.last_piece_type = piece_type
+                vis.last_piece_is_red = is_red
+                vis.last_move = (from_pos, to_pos)
+                vis.move_start_time = pygame.time.get_ticks()
                 
-                if selected_pos is None:
-                    piece = env.board[row][col]
-                    if piece and piece.is_red == env.current_player:
-                        selected_pos = (row, col)
-                        valid_moves = [m for m in env.get_valid_moves() if m[0] == (row, col)]
-                else:
-                    move = (selected_pos, (row, col))
-                    if move in valid_moves:
-                        _, reward, done = env.step(move)
-                        if done:
-                            winner = "Red" if reward > 0 else "Black"
-                            print(f"Game Over! {winner} wins!")
-                            pygame.time.wait(2000)
-                            running = False
-                    selected_pos = None
-                    valid_moves = []
+                # Let the visualizer handle the animation
+                if not vis.animate_move():
+                    return False
             
-            elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
-                    selected_pos = None
-                    valid_moves = []
-                elif event.key == pygame.K_r:  # Reset game
-                    env.reset()
-                    selected_pos = None
-                    valid_moves = []
+            # Make move
+            state, reward, done = env.step((from_pos, to_pos))
+            
+            if visualize:
+                # Draw final position
+                vis.draw_board()
+                pygame.display.flip()
+                pygame.time.wait(int(delay * 1000))  # Convert delay to milliseconds
+            
+            if done:
+                print(f"Game over after {i} moves!")
+                if env.winner is not None:
+                    print(f"Winner: {'Red' if env.winner else 'Black'}")
+                else:
+                    print("Game ended in a draw")
+                break
+                
+        if visualize:
+            # Keep final position visible for a moment
+            pygame.time.wait(2000)
+            vis.close()
+        return True
+            
+    except Exception as e:
+        print(f"Error playing move: {e}")
+        if visualize:
+            vis.close()
+        return False
+
+def main():
+    # Load games from CSV
+    csv_path = 'resources/xiangqi_games.csv'
+    df = load_games(csv_path)
+    if df is None:
+        return
     
-    pygame.quit()
+    # Ask user which game to play
+    while True:
+        print("\nAvailable games:")
+        for i, (game_id, moves) in enumerate(zip(df['game_id'], df['moves']), 1):
+            num_moves = len(moves.split())
+            print(f"{i}. Game {game_id} ({num_moves} moves)")
+        
+        try:
+            choice = input("\nEnter game number to play (or 'q' to quit): ")
+            if choice.lower() == 'q':
+                break
+            
+            game_idx = int(choice) - 1
+            if 0 <= game_idx < len(df):
+                # Get game details
+                game = df.iloc[game_idx]
+                print(f"\nPlaying game {game['game_id']}")
+                if 'event' in game and game['event']:
+                    print(f"Event: {game['event']}")
+                if 'red_player' in game and game['red_player']:
+                    print(f"Red: {game['red_player']}")
+                if 'black_player' in game and game['black_player']:
+                    print(f"Black: {game['black_player']}")
+                
+                # Ask for delay between moves
+                try:
+                    delay = float(input("Enter delay between moves (seconds, default 1.0): ") or 1.0)
+                except ValueError:
+                    delay = 1.0
+                
+                # Play the game
+                success = play_game(game['moves'], delay=delay)
+                if not success:
+                    print("Game playback interrupted")
+                    break
+            else:
+                print("Invalid game number")
+        except ValueError:
+            print("Please enter a valid number")
+        except KeyboardInterrupt:
+            print("\nPlayback interrupted by user")
+            break
 
 def play_recorded_game(game_file):
     """Play a recorded game from a JSON file"""
@@ -177,102 +263,10 @@ def play_recorded_game(game_file):
     
     pygame.quit()
 
-def piece_to_type(piece):
-    """Convert Chinese piece character to internal piece type"""
-    mapping = {
-        "车": 'r', "車": 'r',  # Rook
-        "马": 'h', "馬": 'h',  # Horse
-        "象": 'e', "相": 'e',  # Elephant
-        "士": 'a', "仕": 'a',  # Advisor
-        "将": 'k', "帥": 'k',  # King
-        "炮": 'c', "砲": 'c',  # Cannon
-        "兵": 'p', "卒": 'p',  # Pawn
-    }
-    return mapping.get(piece, '')
-
-def calculate_end_position(from_pos, movement, destination, env):
-    """Calculate destination position based on movement type"""
-    if not from_pos:
-        return None
-        
-    try:
-        row, col = from_pos
-        piece = env.board[row][col]
-        is_red = piece.is_red
-        steps = int(destination) if not isinstance(destination, int) else destination
-        
-        # 使用 environment.py 中的移动逻辑
-        piece_type = piece.piece_type
-        valid_moves = env.get_piece_moves(row, col)
-        
-        # 根据移动类型和目标位置找到匹配的移动
-        for move in valid_moves:
-            _, (target_row, target_col) = move
-            
-            if movement == "horizontal":
-                # 水平移动到指定列
-                # 红方：从右到左数（9-col），如"车二平五"中的5
-                # 黑方：从左到右数（col+1），如"车2平5"中的5
-                target_col_num = target_col + 1 if not is_red else 9 - target_col
-                if target_col_num == steps and target_row == row:
-                    return (target_row, target_col)
-                    
-            elif movement == "forward":
-                # 前进指定步数
-                # 红方：向上移动（行号减小），如"兵七进一"
-                # 黑方：向下移动（行号增大），如"卒7进1"
-                steps_moved = abs(target_row - row)
-                if steps_moved == steps:
-                    # 确认移动方向正确
-                    if (is_red and target_row < row) or (not is_red and target_row > row):
-                        # 确认是直线移动
-                        if target_col == col:
-                            return (target_row, target_col)
-                            
-            elif movement == "backward":
-                # 后退指定步数
-                # 红方：向下移动（行号增大），如"兵七退一"
-                # 黑方：向上移动（行号减小），如"卒7退1"
-                steps_moved = abs(target_row - row)
-                if steps_moved == steps:
-                    # 确认移动方向正确
-                    if (is_red and target_row > row) or (not is_red and target_row < row):
-                        # 确认是直线移动
-                        if target_col == col:
-                            return (target_row, target_col)
-                            
-            elif piece_type == 'h':  # 马的特殊移动
-                if movement == "forward":
-                    # 马前进
-                    # 红方：向上移动（行号减小），如"马二进三"
-                    # 黑方：向下移动（行号增大），如"马2进3"
-                    if ((is_red and target_row < row) or (not is_red and target_row > row)):
-                        col_diff = target_col - col
-                        # 7表示进右，9表示进左
-                        if (steps == 7 and col_diff == 1) or (steps == 9 and col_diff == -1):
-                            return (target_row, target_col)
-                elif movement == "backward":
-                    # 马后退
-                    # 红方：向下移动（行号增大），如"马二退三"
-                    # 黑方：向上移动（行号减小），如"马2退3"
-                    if ((is_red and target_row > row) or (not is_red and target_row < row)):
-                        col_diff = target_col - col
-                        # 7表示退右，9表示退左
-                        if (steps == 7 and col_diff == 1) or (steps == 9 and col_diff == -1):
-                            return (target_row, target_col)
-        
-    except (TypeError, ValueError) as e:
-        print(f"Error calculating end position: {e}")
-    
-    return None
-
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--game', type=str, help='Path to the recorded game JSON file')
-    args = parser.parse_args()
-    
-    if args.game:
-        play_recorded_game(args.game)
-    else:
-        play_game() 
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nProgram terminated by user")
+    finally:
+        pygame.quit() 

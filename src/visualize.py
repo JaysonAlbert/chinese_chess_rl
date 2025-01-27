@@ -44,8 +44,15 @@ def get_system_font():
     return None
         
 class XiangqiVisualizer:
-    def __init__(self, env):
+    def __init__(self, env, animation_duration=1000):
+        """
+        Initialize the visualizer
+        Args:
+            env: The game environment
+            animation_duration: Duration of move animations in milliseconds (default: 1000)
+        """
         self.env = env
+        self.animation_duration = animation_duration
         pygame.init()
         self.square_size = 60
         self.margin = 60  # Increase margin for better visibility of numbers
@@ -344,3 +351,27 @@ class XiangqiVisualizer:
         piece = self.pieces_img[(self.last_piece_type, self.last_piece_is_red)]
         piece_rect = piece.get_rect(center=(current_x, current_y))
         self.screen.blit(piece, piece_rect)
+
+    def animate_move(self):
+        """
+        Animate a piece movement.
+        Returns:
+            False if animation was interrupted
+        """
+        start_time = pygame.time.get_ticks()
+        
+        while pygame.time.get_ticks() - start_time < self.animation_duration:
+            self.draw_board()
+            pygame.display.flip()
+            
+            # Handle pygame events
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self.close()
+                    return False
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        self.close()
+                        return False
+        
+        return True

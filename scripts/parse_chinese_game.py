@@ -2,6 +2,13 @@ import re
 from enum import Enum
 import json
 import os
+import pandas as pd
+from collections import defaultdict
+import sys
+
+# Add the src directory to Python path so we can import from src modules
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+from src.environment import XiangqiEnv
 
 class Piece(Enum):
     ROOK = "车"
@@ -133,36 +140,127 @@ class ChineseNotationParser:
                 "end": self.numbers.get(destination, destination)
             }
 
-def main():
-    # Read game text from file
-    parser = ChineseNotationParser()
+def convert_moves_to_training_format(moves, board_size=(10, 9)):
+    """Convert parsed moves to (from_pos, to_pos) format"""
+    training_moves = []
+    env = XiangqiEnv()  # You'll need to import this from environment.py
     
-    # Process each game file in the games directory
-    games_dir = 'resources/games'
+    for move in moves:
+        try:
+            # Calculate the actual board positions from the Chinese notation
+            from_pos, to_pos = env.calculate_move(move, env.current_player)
+            
+            if from_pos and to_pos:
+                # Format move as "from_row,from_col,to_row,to_col"
+                move_str = f"{from_pos[0]},{from_pos[1]},{to_pos[0]},{to_pos[1]}"
+                training_moves.append(move_str)
+                
+                # Update the environment with the move
+                env.step((from_pos, to_pos))
+            
+        except Exception as e:
+            print(f"Error converting move: {move}, error: {e}")
+            continue
+            
+    return training_moves
+
+def create_training_dataset(games_dir, output_path):
+    """Create a CSV dataset from parsed games"""
+    parser = ChineseNotationParser()
+    all_games = []
+    
+    # Check if games directory exists
+    if not os.path.exists(games_dir):
+        print(f"Error: Games directory '{games_dir}' does not exist")
+        return
+    
+    # Process each game file
     for game_file in os.listdir(games_dir):
         if game_file.endswith('.txt'):
             game_path = os.path.join(games_dir, game_file)
-            with open(game_path, 'r', encoding='utf-8') as f:
-                game_text = f.read()
-            
             try:
+                with open(game_path, 'r', encoding='utf-8') as f:
+                    game_text = f.read()
+                
+                # Parse moves from the game
                 moves = parser.parse_game(game_text)
                 
-                # Create output filename based on input filename
-                output_filename = os.path.splitext(game_file)[0] + '.json'
-                output_path = os.path.join('resources/parsed_games', output_filename)
+                # Convert moves to training format
+                training_moves = convert_moves_to_training_format(moves)
                 
-                # Ensure output directory exists
-                os.makedirs(os.path.dirname(output_path), exist_ok=True)
-                
-                # Save parsed moves to JSON
-                with open(output_path, 'w', encoding='utf-8') as f:
-                    json.dump(moves, f, ensure_ascii=False, indent=2)
-                
-                print(f"Successfully parsed {len(moves)} moves from {game_file}")
+                if training_moves:
+                    # Join moves with spaces to create a single string
+                    moves_str = ' '.join(training_moves)
+                    
+                    # Add game metadata if available
+                    metadata = extract_game_metadata(game_text)
+                    
+                    game_data = {
+                        'game_id': os.path.splitext(game_file)[0],
+                        'moves': moves_str,
+                        'num_moves': len(training_moves),
+                        **metadata
+                    }
+                    
+                    all_games.append(game_data)
+                    print(f"Successfully processed {game_file} - {len(training_moves)} moves")
                 
             except Exception as e:
                 print(f"Error processing {game_file}: {str(e)}")
+    
+    # Create DataFrame and save to CSV
+    df = pd.DataFrame(all_games)
+    
+    if len(df) > 0:
+        df.to_csv(output_path, index=False)
+        print(f"\nCreated dataset with {len(df)} games")
+        
+        # Print some statistics
+        print(f"\nDataset Statistics:")
+        print(f"Total number of games: {len(df)}")
+        print(f"Average moves per game: {df['num_moves'].mean():.1f}")
+        print(f"Max moves in a game: {df['num_moves'].max()}")
+        print(f"Min moves in a game: {df['num_moves'].min()}")
+    else:
+        print("\nNo games were successfully processed. Dataset was not created.")
+
+def extract_game_metadata(game_text):
+    """Extract metadata from game text"""
+    metadata = defaultdict(str)
+    
+    # Look for common metadata patterns
+    patterns = {
+        'event': r'赛事[：:]\s*(.+)',
+        'date': r'日期[：:]\s*(.+)',
+        'red_player': r'红方[：:]\s*(.+)',
+        'black_player': r'黑方[：:]\s*(.+)',
+        'result': r'结果[：:]\s*(.+)'
+    }
+    
+    for key, pattern in patterns.items():
+        match = re.search(pattern, game_text)
+        if match:
+            metadata[key] = match.group(1).strip()
+    
+    return dict(metadata)
+
+def main():
+    # Create output directories if they don't exist
+    os.makedirs('resources/parsed_games', exist_ok=True)
+    os.makedirs('resources/games', exist_ok=True)
+    
+    # Process games and create dataset
+    games_dir = 'resources/games'
+    output_path = 'resources/xiangqi_games.csv'
+    
+    # Check if there are any game files
+    game_files = [f for f in os.listdir(games_dir) if f.endswith('.txt')]
+    if not game_files:
+        print(f"No .txt files found in {games_dir}")
+        print("Please add some Chinese chess game files in .txt format to the games directory")
+        return
+        
+    create_training_dataset(games_dir, output_path)
 
 if __name__ == "__main__":
     main() 
