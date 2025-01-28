@@ -15,17 +15,12 @@ import math
 import pygame
 from xiangqi_rl.visualize import XiangqiVisualizer
 import gc
+from xiangqi_rl.logger import logger
 
 # Set start method to spawn
 if __name__ == '__main__':
     mp.set_start_method('spawn')
 
-# Set up logger
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 class TrainingConfig:
     """Training configuration and hyperparameters"""
@@ -464,19 +459,25 @@ class AlphaZeroTrainer:
 def self_play_worker(game_queue, model_state_dict, config, disable_progress_bar=True):
     """Standalone worker function for parallel self-play"""
     try:
-        # Create new model instance for this worker and force it to CPU
-        model = XiangqiHybridNet()
+        # Create new model instance for this worker and explicitly configure for CPU
+        model = XiangqiHybridNet(device='cpu')
         model.load_state_dict(model_state_dict)
-        model = model.to('cpu')
         model.eval()  # Set to evaluation mode for self-play
+        
+        # Force model to CPU mode and optimize for CPU operations
+        model = model.cpu()
+        torch.set_num_threads(1)  # Restrict to single thread per process
+        torch.set_num_interop_threads(1)
+        
+        # Disable gradient computation permanently for this worker
+        torch.set_grad_enabled(False)
         
         # Create a minimal trainer instance just for self-play
         trainer = AlphaZeroTrainer(model, config, show_board=False, disable_progress_bar=disable_progress_bar)
         
         while True:
             try:
-                with torch.no_grad():  # Disable gradient computation during self-play
-                    game_history = trainer.self_play()
+                game_history = trainer.self_play()
                 game_queue.put(game_history)
             except Exception as e:
                 logger.error(f"Error in self-play worker: {e}")
@@ -489,94 +490,121 @@ class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
         super().__init__(model, config, show_board, disable_progress_bar)
         self.num_workers = num_workers
         self.disable_progress_bar = disable_progress_bar
+        
+        # Set global PyTorch settings for the main process
+        torch.set_num_threads(1)
+        torch.set_num_interop_threads(1)
 
     def parallel_self_play(self):
         """Execute self-play games in parallel"""
         # Create a queue for collecting game results
         game_queue = mp.Queue()
         
-        # Get model state dict and move it to CPU for workers
-        cpu_state_dict = {k: v.cpu() for k, v in self.model.state_dict().items()}
+        # Get model state dict and ensure it's on CPU with contiguous memory
+        cpu_state_dict = {k: v.cpu().contiguous() for k, v in self.model.state_dict().items()}
         
-        # Create worker processes
+        # Create worker processes with explicit CPU affinity if possible
         workers = []
         logger.info(f"Starting {self.num_workers} worker processes...")
         
-        for i in range(self.num_workers):
-            p = mp.Process(
-                target=self_play_worker,
-                args=(game_queue, cpu_state_dict, self.config, True if i != 0 else False)
-            )
-            p.start()
-            workers.append(p)
+        try:
+            import psutil  # For CPU affinity management
             
+            for i in range(self.num_workers):
+                p = mp.Process(
+                    target=self_play_worker,
+                    args=(game_queue, cpu_state_dict, self.config, True if i != 0 else False)
+                )
+                p.start()
+                
+                # Set CPU affinity for each worker process
+                worker_process = psutil.Process(p.pid)
+                # Assign each worker to a specific CPU core
+                worker_process.cpu_affinity([i % psutil.cpu_count()])
+                
+                workers.append(p)
+        except ImportError:
+            # Fall back to normal process creation if psutil is not available
+            for i in range(self.num_workers):
+                p = mp.Process(
+                    target=self_play_worker,
+                    args=(game_queue, cpu_state_dict, self.config, True if i != 0 else False)
+                )
+                p.start()
+                workers.append(p)
+
         # Collect results
         games_collected = 0
         all_games = []
         
         # Only show progress bar in main process
         pbar = tqdm(total=self.config.games_per_iteration, 
-                   desc="Collecting parallel self-play games",
-                   position=0)
+                    desc="Collecting parallel self-play games",
+                    position=0)
         
-        while games_collected < self.config.games_per_iteration:
-            try:
-                game_history = game_queue.get(timeout=300)  # 5 minute timeout
-                all_games.extend(game_history)
-                games_collected += 1
-                pbar.update(1)
-                pbar.set_postfix({'collected': games_collected})
-                
-                if games_collected >= self.config.games_per_iteration:
-                    break
+        try:
+            while games_collected < self.config.games_per_iteration:
+                try:
+                    game_history = game_queue.get(timeout=300)  # 5 minute timeout
+                    all_games.extend(game_history)
+                    games_collected += 1
+                    pbar.update(1)
+                    pbar.set_postfix({
+                        'collected': games_collected,
+                        'buffer_size': len(self.replay_buffer) + len(all_games)
+                    })
                     
-            except Exception as e:
-                logger.error(f"Error collecting game results: {e}")
-                break
-                
-        pbar.close()
-        
-        # Terminate workers
-        logger.info("Terminating worker processes...")
-        for w in workers:
-            w.terminate()
-            w.join()
+                    # Start training if we have enough data
+                    if len(self.replay_buffer) + len(all_games) >= self.config.min_buffer_size:
+                        # Add collected games to replay buffer
+                        self.replay_buffer.extend(all_games)
+                        all_games = []  # Clear collected games
+                        
+                        # Do some training steps
+                        train_steps = self.config.steps_per_iteration // self.config.games_per_iteration
+                        train_pbar = tqdm(range(train_steps), 
+                                        desc="Training steps", 
+                                        leave=False)
+                        
+                        for step in train_pbar:
+                            batch = random.sample(self.replay_buffer, self.config.batch_size)
+                            policy_loss, value_loss = self.train_on_batch(batch)
+                            train_pbar.set_postfix({
+                                'p_loss': f'{policy_loss:.3f}',
+                                'v_loss': f'{value_loss:.3f}'
+                            })
+                    
+                    if games_collected >= self.config.games_per_iteration:
+                        break
+                        
+                except Exception as e:
+                    logger.error(f"Error collecting game results: {e}")
+                    break
+        finally:
+            pbar.close()
             
-        return all_games
+            # Terminate workers
+            logger.info("Terminating worker processes...")
+            for w in workers:
+                w.terminate()
+                w.join()
+        
+        # Add any remaining games to replay buffer
+        if all_games:
+            self.replay_buffer.extend(all_games)
+        
+        return len(self.replay_buffer)
 
     def train(self):
         """Main training loop with parallel self-play"""
         try:
             # Main training iterations
             for iteration in tqdm(range(self.config.num_iterations), desc="Training iterations"):
-                # Parallel self-play phase
-                game_histories = self.parallel_self_play()
+                # Parallel self-play phase and training
+                buffer_size = self.parallel_self_play()
                 
-                # Log the number of games collected
-                logger.info(f"Collected {len(game_histories)} game positions")
-                
-                self.replay_buffer.extend(game_histories)
-                logger.info(f"Replay buffer size: {len(self.replay_buffer)}")
-                
-                # Training phase
-                if len(self.replay_buffer) >= self.config.batch_size:
-                    train_pbar = tqdm(range(self.config.steps_per_iteration), 
-                                    desc=f"Training steps (iter {iteration})", 
-                                    leave=False)
-                    
-                    for step in train_pbar:
-                        batch = random.sample(self.replay_buffer, self.config.batch_size)
-                        policy_loss, value_loss = self.train_on_batch(batch)
-                        
-                        train_pbar.set_postfix({
-                            'policy_loss': f'{policy_loss:.3f}',
-                            'value_loss': f'{value_loss:.3f}'
-                        })
-                        
-                        self.writer.add_scalar('Loss/Policy', policy_loss, 
-                                             iteration * self.config.steps_per_iteration + step)
-                        self.writer.add_scalar('Loss/Value', value_loss, 
-                                             iteration * self.config.steps_per_iteration + step)
+                # Log the buffer size
+                logger.info(f"Replay buffer size: {buffer_size}")
                 
                 # Evaluation and checkpoint saving
                 if iteration % self.config.eval_interval == 0:
@@ -593,7 +621,7 @@ class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
 
 def test_mcts():
     """Test MCTS behavior"""
-    model = XiangqiHybridNet()
+    model = XiangqiHybridNet(device='cpu')
     mcts = MCTS(model, num_simulations=200)
     env = XiangqiEnv()
     

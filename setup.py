@@ -17,6 +17,7 @@ setup(
         "requests",
         "playwright",
         "tensorboard",
+        "psutil",
     ],
     python_requires=">=3.8",
     classifiers=[

@@ -23,7 +23,7 @@ class ResBlock(nn.Module):
         return x
 
 class XiangqiHybridNet(nn.Module):
-    def __init__(self, num_res_blocks=19, num_channels=256):
+    def __init__(self, num_res_blocks=19, num_channels=256, device=get_device()):
         super(XiangqiHybridNet, self).__init__()
         
         # Input channels: 14 (7 piece types * 2 colors)
@@ -62,7 +62,7 @@ class XiangqiHybridNet(nn.Module):
             nn.Tanh()
         )
         
-        self.device = get_device()
+        self.device = device
         self.to(self.device)
     
     def forward(self, x):
