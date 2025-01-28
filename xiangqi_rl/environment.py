@@ -345,7 +345,7 @@ class Pawn(Piece):
                 moves.append(((row, col), (new_row, col)))
         
         # Horizontal moves if across river
-        if (self.is_red and row > 4) or (not self.is_red and row < 5):
+        if (self.is_red and row < 5) or (not self.is_red and row > 4):
             for dc in [-1, 1]:
                 new_col = col + dc
                 if 0 <= new_col < 9:

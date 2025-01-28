@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import argparse
 
 # Add the project root directory to Python path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -54,7 +55,7 @@ class AIPlayer:
         return self.agent.select_action(state, valid_moves, temperature=1.0)  # Higher temperature for more randomness
 
 def find_model():
-    """Find a valid model in the checkpoints directory"""
+    """Find a valid model in the checkpoints directory if no model path is provided"""
     checkpoint_dir = os.path.join(project_root, 'logs', 'checkpoints')
     if not os.path.exists(checkpoint_dir):
         os.makedirs(checkpoint_dir, exist_ok=True)
@@ -62,11 +63,11 @@ def find_model():
         
     # Try different model file patterns
     patterns = [
+        'final_model.pt',
         'model_episode_*.pt',
         'model_episode_*.pth',
         'best_model.pt',
         'best_model.pth',
-        'final_model.pt',
         'final_model.pth'
     ]
     
@@ -79,14 +80,19 @@ def find_model():
     return None
 
 def main():
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Play Xiangqi against AI')
+    parser.add_argument('--model', type=str, help='Path to the model file', default=None)
+    args = parser.parse_args()
+
     # Initialize environment and visualizer
     env = XiangqiEnv()
     visualizer = XiangqiVisualizer(env, debug=False)
     
-    # Find and load a model
-    model_path = find_model()
+    # Use provided model path or find one
+    model_path = args.model if args.model else find_model()
     if model_path:
-        print(f"Found model at: {model_path}")
+        print(f"Using model at: {model_path}")
     else:
         print("No trained model found - AI will play randomly")
     
