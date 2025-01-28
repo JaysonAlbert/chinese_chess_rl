@@ -613,9 +613,37 @@ class XiangqiEnv:
         # Store the target piece before moving
         target_piece = self.board[to_row][to_col]
         
-        # Make the move
+        # Calculate intermediate rewards
+        reward = 0
+        
+        # Reward for capturing pieces (weighted by piece value)
+        piece_values = {
+            'p': 1,    # Pawn
+            'c': 4,    # Cannon
+            'h': 4,    # Horse
+            'r': 9,    # Rook
+            'e': 2,    # Elephant
+            'a': 2,    # Advisor
+            'k': 100   # King
+        }
+        
+        if target_piece:
+            reward += 0.1 * piece_values[target_piece.piece_type]
+        
+        # Small reward for checking opponent's king
         self.board[to_row][to_col] = piece
         self.board[from_row][from_col] = None
+        
+        if self.is_king_in_check(not self.current_player):
+            reward += 0.2
+        
+        # Small reward for protecting own pieces
+        protected = self._get_protected_pieces((to_row, to_col))
+        reward += 0.05 * len(protected)
+        
+        # Small reward for threatening opponent pieces
+        threatened = self._get_threatened_pieces((to_row, to_col))
+        reward += 0.05 * len(threatened)
         
         # Update current player
         self.current_player = not self.current_player
@@ -628,21 +656,23 @@ class XiangqiEnv:
         if target_piece and target_piece.piece_type == 'k':
             done = True
             info['winner'] = not self.current_player  # Previous player wins
+            reward += 10  # Big reward for winning
         
         # 2. Check if current player is in checkmate
         elif self._is_checkmate():
             done = True
             info['winner'] = not self.current_player  # Previous player wins
+            reward += 10  # Big reward for winning
         
         # 3. Check if it's a stalemate
         elif self._is_stalemate():
             done = True
             info['winner'] = None  # Draw
+            reward += 0  # Neutral reward for draw
         
-        # Calculate reward
-        reward = 0
-        if done and info['winner'] is not None:
-            reward = 1 if info['winner'] == (not self.current_player) else -1
+        # Small penalty for being in check
+        if self.is_king_in_check(self.current_player):
+            reward -= 0.3
         
         return self._get_state(), reward, done, info
 
