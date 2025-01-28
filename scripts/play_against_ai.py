@@ -10,10 +10,10 @@ import numpy as np
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(project_root)
 
-from src.environment import XiangqiEnv
-from src.visualize import XiangqiVisualizer
-from src.model import XiangqiHybridNet
-from src.agent import XiangqiAgent
+from xiangqi_rl.environment import XiangqiEnv
+from xiangqi_rl.visualize import XiangqiVisualizer
+from xiangqi_rl.model import XiangqiHybridNet
+from xiangqi_rl.agent import XiangqiAgent
 
 class AIPlayer:
     def __init__(self, env, model_path=None, device='cuda' if torch.cuda.is_available() else 'cpu'):

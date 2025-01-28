@@ -2,7 +2,14 @@ import pygame
 import numpy as np
 import os
 import platform
+import logging
 
+# Set up logger
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 def get_system_font():
     system = platform.system()
@@ -163,7 +170,7 @@ class XiangqiVisualizer:
         # 使用系统中文字体
         font_name = get_system_font()
         if not font_name:  # 如果没有找到合适的字体，打印警告
-            print("Warning: No suitable Chinese font found. Pieces may not display correctly.")
+            logger.warning("No suitable Chinese font found. Pieces may not display correctly.")
         
         # 对于棋子文字，我们使用稍大一点的字号以确保清晰可见
         font = pygame.font.SysFont(font_name, int(size * 0.7))  # 增大字号到原来的0.7倍
@@ -173,7 +180,7 @@ class XiangqiVisualizer:
             text_rect = text.get_rect(center=(size//2, size//2))
             surface.blit(text, text_rect)
         except pygame.error as e:
-            print(f"Error rendering piece text: {e}")
+            logger.error(f"Error rendering piece text: {e}")
             # 如果渲染失败，尝试使用备用字符
             fallback_symbols = {'r': 'R', 'h': 'H', 'e': 'E', 'a': 'A', 
                               'k': 'K', 'c': 'C', 'p': 'P'}
@@ -332,10 +339,6 @@ class XiangqiVisualizer:
         text_rect = text.get_rect(center=(self.width//2, self.height - self.margin + 25))
         self.screen.blit(text, text_rect)
         
-        # Show last move if any
-        if self.last_move:
-            self._draw_move_effects(*self.last_move)
-        
         # Debug: draw intersection points
         if self.debug:
             for i in range(10):
@@ -346,59 +349,51 @@ class XiangqiVisualizer:
         
         pygame.display.flip()
 
-    def _draw_move_effects(self, from_pos, to_pos):
-        """绘制移动效果（起点、终点高亮和轨迹线）"""
+    def animate_move(self, from_pos, to_pos, duration=500):
+        """Animate piece movement with highlights"""
         from_row, from_col = from_pos
         to_row, to_col = to_pos
+        piece = self.env.board[from_row][from_col]
+        if not piece:
+            return
+
+        start_time = pygame.time.get_ticks()
         
-        # 计算棋盘上的实际坐标
+        # Calculate board positions
         from_x = self.margin + from_col * self.square_size
         from_y = self.margin + from_row * self.square_size
         to_x = self.margin + to_col * self.square_size
         to_y = self.margin + to_row * self.square_size
-        
-        # 绘制起点高亮
-        highlight = pygame.Surface((self.square_size - 10, self.square_size - 10), pygame.SRCALPHA)
-        highlight.fill(self.HIGHLIGHT_FROM)
-        highlight_rect = highlight.get_rect(center=(from_x, from_y))
-        self.screen.blit(highlight, highlight_rect)
-        
-        # 绘制终点高亮
-        highlight = pygame.Surface((self.square_size - 10, self.square_size - 10), pygame.SRCALPHA)
-        highlight.fill(self.HIGHLIGHT_TO)
-        highlight_rect = highlight.get_rect(center=(to_x, to_y))
-        self.screen.blit(highlight, highlight_rect)
-        
-        # 绘制移动轨迹线
-        pygame.draw.line(self.screen, self.MOVE_LINE, (from_x, from_y), (to_x, to_y), 2)
 
-    def animate_move(self, from_pos, to_pos, duration=500):
-        """Animate piece movement"""
-        start_time = pygame.time.get_ticks()
-        piece = self.env.board[from_pos[0]][from_pos[1]]
-        if not piece:
-            return
-        
         while pygame.time.get_ticks() - start_time < duration:
-            # Calculate current position
-            progress = (pygame.time.get_ticks() - start_time) / duration
-            progress = min(1.0, progress)  # Clamp to 1.0
+            progress = min(1.0, (pygame.time.get_ticks() - start_time) / duration)
             
-            current_x = self.margin + (from_pos[1] + (to_pos[1] - from_pos[1]) * progress) * self.square_size
-            current_y = self.margin + (from_pos[0] + (to_pos[0] - from_pos[0]) * progress) * self.square_size
+            # Calculate current position
+            current_x = from_x + (to_x - from_x) * progress
+            current_y = from_y + (to_y - from_y) * progress
             
             # Draw board without the moving piece
-            self.env.board[from_pos[0]][from_pos[1]] = None
+            self.env.board[from_row][from_col] = None
             self.draw_board()
-            self.env.board[from_pos[0]][from_pos[1]] = piece
+            self.env.board[from_row][from_col] = piece
+            
+            # Draw highlights
+            for pos, color in [(from_pos, (0, 255, 0, 128)), (to_pos, (255, 255, 0, 128))]:
+                x = self.margin + pos[1] * self.square_size
+                y = self.margin + pos[0] * self.square_size
+                highlight = pygame.Surface((self.square_size - 10, self.square_size - 10), pygame.SRCALPHA)
+                highlight.fill(color)
+                self.screen.blit(highlight, highlight.get_rect(center=(x, y)))
+            
+            # Draw move line
+            pygame.draw.line(self.screen, (0, 150, 255), (from_x, from_y), (to_x, to_y), 2)
             
             # Draw the moving piece
             img = self.pieces_img[(piece.piece_type, piece.is_red)]
-            img_rect = img.get_rect(center=(current_x, current_y))
-            self.screen.blit(img, img_rect)
+            self.screen.blit(img, img.get_rect(center=(current_x, current_y)))
             
             pygame.display.flip()
-            pygame.time.wait(10)  # Control animation speed
+            pygame.time.wait(10)
         
-        # Update last move for highlighting
+        # Store last move for future reference
         self.last_move = (from_pos, to_pos)

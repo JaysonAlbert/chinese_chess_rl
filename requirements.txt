@@ -1,9 +1,0 @@
-torch
-numpy==1.24.3
-pygame
-tqdm
-pandas==2.0.3
-transformers
-requests
-playwright
-tensorboard

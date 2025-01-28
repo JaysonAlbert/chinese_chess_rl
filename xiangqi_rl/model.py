@@ -2,6 +2,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+def get_device():
+    """Get the best available device (CUDA if available, else CPU)"""
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 class XiangqiHybridNet(nn.Module):
     def __init__(self):
         super(XiangqiHybridNet, self).__init__()
@@ -29,8 +33,14 @@ class XiangqiHybridNet(nn.Module):
         self.value_bn = nn.BatchNorm2d(32)
         self.value_fc1 = nn.Linear(32 * 10 * 9, 256)
         self.value_fc2 = nn.Linear(256, 1)
+        
+        self.device = get_device()
+        self.to(self.device)
     
     def forward(self, x):
+        # Ensure input is on the correct device
+        x = x.to(self.device)
+        
         # Shared layers
         x = F.relu(self.bn1(self.conv1(x)))
         x = F.relu(self.bn2(self.conv2(x)))
@@ -67,6 +77,6 @@ class XiangqiHybridNet(nn.Module):
             return attention_weights
 
     def to(self, device):
-        """Override to() to ensure pos_encoding moves to the correct device"""
-        super().to(device)
-        return self 
+        """Override to method to handle device transfer properly"""
+        self.device = device
+        return super().to(device) 

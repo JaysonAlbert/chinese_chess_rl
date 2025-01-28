@@ -5,10 +5,10 @@ from tqdm import tqdm
 import pygame
 import logging
 import numpy as np
-from src.environment import XiangqiEnv
-from src.agent import XiangqiAgent
-from src.model import XiangqiHybridNet
-from src.visualize import XiangqiVisualizer
+from xiangqi_rl.environment import XiangqiEnv
+from xiangqi_rl.agent import XiangqiAgent
+from xiangqi_rl.model import XiangqiHybridNet, get_device
+from xiangqi_rl.visualize import XiangqiVisualizer
 import pandas as pd
 import os
 from torch.utils.tensorboard import SummaryWriter
@@ -17,7 +17,8 @@ import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.amp import autocast
 import torch.distributed as dist
-from torch.cuda.amp import GradScaler
+from torch.amp import GradScaler
+from contextlib import nullcontext
 
 # Set start method to spawn
 if __name__ == '__main__':
@@ -136,8 +137,13 @@ def run_episode(args):
         # Reuse tensor instead of creating new one
         state_tensor[0] = torch.FloatTensor(env._get_state())
         action = agent.select_action(state_tensor[0], valid_moves, temperature=1.0)
-        next_state, reward, done = env.step(action)
-        episode_data.append((env._get_state().copy(), action, reward))  # Use .copy() to avoid reference issues
+        step_result = env.step(action)
+        if len(step_result) == 4:
+            next_state, reward, done, info = step_result
+        else:
+            next_state, reward, done = step_result
+        
+        episode_data.append((env._get_state(), action, reward, done))
         state = next_state
         episode_reward += reward
         
@@ -192,14 +198,15 @@ def train(num_episodes=1000, batch_size=256, visualize=True, pretrained_model=No
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     
-    # Set up mixed precision training
-    scaler = GradScaler()
+    # Initialize scaler only if CUDA is available
+    scaler = torch.amp.GradScaler('cuda') if torch.cuda.is_available() else None
     
     # Increase number of worker threads for data loading
     num_workers = mp.cpu_count()
     
     # Set up device and model
-    device = torch.device('cuda')
+    device = get_device()
+    logger.info(f"Using device: {device}")
     if pretrained_model:
         model = pretrained_model.to(device)
     else:
@@ -245,6 +252,9 @@ def train(num_episodes=1000, batch_size=256, visualize=True, pretrained_model=No
     # Track best model performance
     best_reward = float('-inf')
     best_win_rate = 0.0
+    
+    # Initialize visualizer if needed
+    vis = XiangqiVisualizer(env) if visualize else None
     
     try:
         if use_multiprocess:
@@ -429,7 +439,6 @@ def train(num_episodes=1000, batch_size=256, visualize=True, pretrained_model=No
             # Single process version
             pbar = tqdm(total=num_episodes, desc='Training (SP)')
             for episode in range(num_episodes):
-                # Run single episode
                 state = env.reset()
                 episode_data = []
                 move_count = 0
@@ -439,8 +448,11 @@ def train(num_episodes=1000, batch_size=256, visualize=True, pretrained_model=No
                 episode_reward = 0
 
                 for move_count in range(max_moves):
-                    if visualize:
+                    if visualize and vis is not None:
                         vis.draw_board()
+                        if env.last_move:  # Only animate if there was a previous move
+                            from_pos, to_pos = env.last_move
+                            vis.animate_move(from_pos, to_pos)
                         pygame.time.wait(100)
 
                     valid_moves = env.get_valid_moves()
@@ -448,30 +460,43 @@ def train(num_episodes=1000, batch_size=256, visualize=True, pretrained_model=No
                         break
 
                     action = agent.select_action(env._get_state(), valid_moves, temperature=1.0)
-                    next_state, reward, done = env.step(action)
-                    episode_data.append((env._get_state(), action, reward))
+                    step_result = env.step(action)
+                    if len(step_result) == 4:
+                        next_state, reward, done, info = step_result
+                    else:
+                        next_state, reward, done = step_result
+                    
+                    episode_data.append((env._get_state(), action, reward, done))
                     state = next_state
                     episode_reward += reward
 
                     if done:
                         break
 
-                # Train on episode data
-                if len(replay_buffer) >= batch_size:
-                    for _ in range(training_iterations_per_episode):
-                        indices = np.random.choice(len(replay_buffer), batch_size, replace=False)
-                        batch_data = [replay_buffer[i] for i in indices]
-                        p_loss, v_loss = optimize_model_mixed_precision(model, optimizer, batch_data, agent, scaler)
-                        policy_losses.append(p_loss)
-                        value_losses.append(v_loss)
+                    # Track stats
+                    if env._is_in_check():
+                        episode_checks += 1
+                    if env.last_move:
+                        to_row = env.last_move[1][0]
+                        if (to_row < 5 and env.current_player) or (to_row > 4 and not env.current_player):
+                            episode_crosses += 1
+                    
+                    # Train on episode data
+                    if len(replay_buffer) >= batch_size:
+                        for _ in range(training_iterations_per_episode):
+                            indices = np.random.choice(len(replay_buffer), batch_size, replace=False)
+                            batch_data = [replay_buffer[i] for i in indices]
+                            p_loss, v_loss = optimize_model_mixed_precision(model, optimizer, batch_data, agent, scaler)
+                            policy_losses.append(p_loss)
+                            value_losses.append(v_loss)
 
-                # Update replay buffer
-                replay_buffer.extend(episode_data)
-                if len(replay_buffer) > max_buffer_size:
-                    del replay_buffer[:len(replay_buffer)-max_buffer_size]
+                    # Update replay buffer
+                    replay_buffer.extend(episode_data)
+                    if len(replay_buffer) > max_buffer_size:
+                        del replay_buffer[:len(replay_buffer)-max_buffer_size]
 
-                # Rest of the existing statistics and logging code...
-                pbar.update(1)
+                    # Rest of the existing statistics and logging code...
+                    pbar.update(1)
     except KeyboardInterrupt:
         # Save final model on interrupt
         logger.info("\nTraining interrupted, saving checkpoint...")
@@ -492,37 +517,99 @@ def train(num_episodes=1000, batch_size=256, visualize=True, pretrained_model=No
         torch.save(model.state_dict(), final_path)
         logger.info(f"Saved final model to {final_path}")
         
-        if visualize:
+        if visualize and vis is not None:
             vis.close()
         writer.close()
     
     return model
 
 def optimize_model_mixed_precision(model, optimizer, batch_data, agent, scaler):
-    states, actions, rewards = zip(*batch_data)
-    
     device = next(model.parameters()).device
+    states, actions, rewards, dones = zip(*batch_data)  # Add dones to batch data
     
-    # Prepare tensors
-    states_array = np.array(states)
-    state_tensor = torch.FloatTensor(states_array).pin_memory().to(device, non_blocking=True)
-    action_tensor = torch.LongTensor([agent._move_to_index(a) for a in actions]).pin_memory().to(device, non_blocking=True)
-    reward_tensor = torch.FloatTensor(rewards).pin_memory().to(device, non_blocking=True)
+    # Convert to tensors
+    state_tensor = torch.FloatTensor(np.array(states)).to(device)  # Convert to numpy array first
+    action_tensor = torch.LongTensor([agent._move_to_index(a) for a in actions]).to(device)
+    reward_tensor = torch.FloatTensor(rewards).to(device)
+    done_tensor = torch.BoolTensor(dones).to(device)
     
-    # Use mixed precision training
-    with autocast('cuda'):
+    # Only use autocast if CUDA is available
+    context = autocast(device_type='cuda') if torch.cuda.is_available() else nullcontext()
+    
+    with context:
         policy, value = model(state_tensor)
-        policy_loss = -torch.mean(policy.gather(1, action_tensor.unsqueeze(1)))
-        value_loss = torch.mean((value - reward_tensor) ** 2)
-        loss = policy_loss + value_loss
+        
+        # Compute value targets using n-step returns
+        value_targets = compute_value_targets(reward_tensor, value.detach(), done_tensor, gamma=0.99)
+        
+        # Compute proper value targets using future returns
+        value_loss = torch.mean((value - value_targets) ** 2)
+        
+        # Policy loss using log probabilities
+        log_probs = F.log_softmax(policy, dim=1)
+        action_log_probs = log_probs.gather(1, action_tensor.unsqueeze(1))
+        policy_loss = -(action_log_probs * reward_tensor.unsqueeze(1)).mean()
 
-    # Optimize with gradient scaling
-    optimizer.zero_grad(set_to_none=True)  # Slightly more efficient than zero_grad()
-    scaler.scale(loss).backward()
-    scaler.step(optimizer)
-    scaler.update()
+    # Optimize with gradient scaling if CUDA is available, otherwise normal optimization
+    optimizer.zero_grad(set_to_none=True)
+    if scaler is not None:
+        scaler.scale(policy_loss + value_loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+    else:
+        (policy_loss + value_loss).backward()
+        optimizer.step()
     
     return policy_loss.item(), value_loss.item()
+
+def compute_value_targets(rewards, values, dones, gamma=0.99):
+    """
+    Compute value targets using n-step returns
+    Args:
+        rewards: tensor of rewards for the batch
+        values: tensor of value predictions
+        dones: tensor of done flags
+        gamma: discount factor
+    """
+    batch_size = rewards.size(0)
+    returns = torch.zeros_like(rewards)
+    
+    # Ensure all tensors have the same shape
+    values = values.squeeze()  # Remove extra dimensions if any
+    
+    # Initialize the return with the value of the last state if not done
+    next_return = torch.where(dones, torch.zeros_like(values), values)
+    
+    # Compute returns backwards
+    for t in reversed(range(batch_size)):
+        returns[t] = rewards[t] + gamma * next_return[t] * (1 - dones[t].float())
+    
+    return returns.unsqueeze(1)  # Add back the dimension for consistency
+
+def calculate_reward(self, state, action, next_state):
+    reward = 0
+    # Reward for capturing pieces
+    if self.piece_captured:
+        reward += 0.1
+    # Reward for checking opponent
+    if self.is_in_check():
+        reward += 0.05
+    # Reward for controlling center
+    if self.piece_in_center():
+        reward += 0.02
+    return reward
+
+class PrioritizedReplayBuffer:
+    def __init__(self, capacity):
+        self.capacity = capacity
+        self.buffer = []
+        self.priorities = []
+        
+    def sample(self, batch_size):
+        probs = np.array(self.priorities) ** 0.6
+        probs = probs / np.sum(probs)
+        indices = np.random.choice(len(self.buffer), batch_size, p=probs)
+        return [self.buffer[idx] for idx in indices], indices
 
 if __name__ == "__main__":
     # Parse command line arguments

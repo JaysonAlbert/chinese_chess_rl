@@ -8,7 +8,7 @@ import sys
 
 # Add the src directory to Python path so we can import from src modules
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-from src.environment import XiangqiEnv
+from xiangqi_rl.environment import XiangqiEnv
 
 class Piece(Enum):
     ROOK = "车"

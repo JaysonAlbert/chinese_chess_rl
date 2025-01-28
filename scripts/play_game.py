@@ -8,87 +8,95 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pygame
 import numpy as np
-from src.environment import XiangqiEnv, Piece
+from xiangqi_rl.environment import XiangqiEnv, Piece
 import json
-from src.visualize import XiangqiVisualizer
+from xiangqi_rl.visualize import XiangqiVisualizer
+import logging
+
+# Set up logger
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 def load_games(csv_path):
     """Load games from CSV file"""
     if not os.path.exists(csv_path):
-        print(f"Error: CSV file not found at {csv_path}")
+        logger.error(f"CSV file not found at {csv_path}")
         return None
     
     try:
         df = pd.read_csv(csv_path)
-        print(f"Loaded {len(df)} games from {csv_path}")
+        logger.info(f"Loaded {len(df)} games from {csv_path}")
         return df
     except Exception as e:
-        print(f"Error loading CSV file: {e}")
+        logger.error(f"Error loading CSV file: {e}")
         return None
 
 def play_game(moves_str, delay=1.0, visualize=True):
     """Play through a single game"""
     env = XiangqiEnv()
+    vis = None
     if visualize:
-        vis = XiangqiVisualizer(env, animation_duration=int(delay * 1000))  # Convert delay to milliseconds
-        pygame.init()  # Initialize pygame
-        # Bring game window to front
+        vis = XiangqiVisualizer(env)
+        pygame.init()
         pygame.display.set_mode((vis.width, vis.height), pygame.NOFRAME | pygame.SHOWN)
         pygame.display.flip()
     
     moves = moves_str.split()
-    print(f"\nPlaying game with {len(moves)} moves...")
+    logger.info(f"Playing game with {len(moves)} moves...")
     
     try:
         for i, move_str in enumerate(moves, 1):
-            # Parse move string (format: "from_row,from_col,to_row,to_col")
+            # Handle pygame events to keep window responsive
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    if visualize:
+                        vis.close()
+                    return False
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                    if visualize:
+                        vis.close()
+                    return False
+
             from_row, from_col, to_row, to_col = map(int, move_str.split(','))
             from_pos = (from_row, from_col)
             to_pos = (to_row, to_col)
             
-            # Get piece at from_pos
+            # Get piece info and make move
             piece = env.board[from_row][from_col]
             if piece:
-                piece_type = piece.piece_type
-                is_red = piece.is_red
-                print(f"Move {i}: {'Red' if is_red else 'Black'} {piece_type} from {from_pos} to {to_pos}")
+                logger.info(f"Move {i}: {'Red' if piece.is_red else 'Black'} {piece.piece_type} from {from_pos} to {to_pos}")
             
             if visualize:
-                # Set up animation
-                vis.last_piece_type = piece_type
-                vis.last_piece_is_red = is_red
-                vis.last_move = (from_pos, to_pos)
-                vis.move_start_time = pygame.time.get_ticks()
-                
-                # Let the visualizer handle the animation
-                if not vis.animate_move():
-                    return False
+                # Draw initial state and animate
+                vis.draw_board()
+                vis.animate_move(from_pos, to_pos)
+                pygame.display.flip()
             
-            # Make move
-            state, reward, done = env.step((from_pos, to_pos))
+            # Update game state after animation
+            state, reward, done, info = env.step((from_pos, to_pos))
             
             if visualize:
-                # Draw final position
+                # Draw final position and wait
                 vis.draw_board()
                 pygame.display.flip()
-                pygame.time.wait(int(delay * 1000))  # Convert delay to milliseconds
+                pygame.time.wait(int(delay * 1000))
             
             if done:
-                print(f"Game over after {i} moves!")
-                if env.winner is not None:
-                    print(f"Winner: {'Red' if env.winner else 'Black'}")
-                else:
-                    print("Game ended in a draw")
+                logger.info(f"Game over after {i} moves!")
+                logger.info(f"Winner: {'Red' if env.winner else 'Black'}" if env.winner is not None else "Draw")
+                if visualize:
+                    pygame.time.wait(2000)
                 break
-                
+        
         if visualize:
-            # Keep final position visible for a moment
-            pygame.time.wait(2000)
             vis.close()
         return True
             
     except Exception as e:
-        print(f"Error playing move: {e}")
+        logger.error(f"Error playing move: {e}")
         if visualize:
             vis.close()
         return False
@@ -200,6 +208,7 @@ def play_recorded_game(game_file):
                             visualizer.last_move = (from_pos, to_pos)
                             visualizer.move_start_time = current_time
                             
+                            visualizer.animate_move(from_pos, to_pos)
                             _, reward, done = env.step((from_pos, to_pos))
                             move_index += 1
                             waiting_for_next_move = True  # 设置等待状态
