@@ -201,7 +201,7 @@ class AlphaZeroTrainer:
         self.model = model
         self.config = config
         self.show_board = show_board
-        num_sims = 50
+        num_sims = 50 if show_board else 200
         self.mcts = MCTS(model, num_simulations=num_sims, max_moves=200)
         self.optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
         self.replay_buffer = deque(maxlen=config.max_buffer_size)
@@ -333,21 +333,41 @@ class AlphaZeroTrainer:
     def train(self):
         """Main training loop"""
         try:
-            for iteration in tqdm(range(self.config.num_iterations), desc="Training"):
+            # Main training iterations
+            for iteration in tqdm(range(self.config.num_iterations), desc="Training iterations"):
                 # Self-play phase
-                for _ in range(self.config.num_selfplay_games):
+                selfplay_pbar = tqdm(range(self.config.num_selfplay_games), 
+                                   desc=f"Self-play games (iter {iteration})", 
+                                   leave=False)
+                
+                for _ in selfplay_pbar:
                     game_history = self.self_play()
                     self.replay_buffer.extend(game_history)
+                    # Update progress bar with buffer size
+                    selfplay_pbar.set_postfix({
+                        'buffer_size': len(self.replay_buffer),
+                        'last_game_len': len(game_history)
+                    })
                 
                 # Training phase
                 if len(self.replay_buffer) >= self.config.batch_size:
-                    for _ in range(self.config.training_steps):
+                    train_pbar = tqdm(range(self.config.training_steps), 
+                                    desc=f"Training steps (iter {iteration})", 
+                                    leave=False)
+                    
+                    for step in train_pbar:
                         batch = random.sample(self.replay_buffer, self.config.batch_size)
                         policy_loss, value_loss = self.train_on_batch(batch)
                         
+                        # Update progress bar with losses
+                        train_pbar.set_postfix({
+                            'policy_loss': f'{policy_loss:.3f}',
+                            'value_loss': f'{value_loss:.3f}'
+                        })
+                        
                         # Log losses
-                        self.writer.add_scalar('Loss/Policy', policy_loss, iteration)
-                        self.writer.add_scalar('Loss/Value', value_loss, iteration)
+                        self.writer.add_scalar('Loss/Policy', policy_loss, iteration * self.config.training_steps + step)
+                        self.writer.add_scalar('Loss/Value', value_loss, iteration * self.config.training_steps + step)
                 
                 # Evaluation phase
                 if iteration % self.config.eval_interval == 0:
