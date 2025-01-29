@@ -461,7 +461,7 @@ class AlphaZeroTrainer:
         }, checkpoint_path)
         logger.info(f"Saved checkpoint to {checkpoint_path}")
 
-def self_play_worker(game_queue, model_state_dict, config):
+def self_play_worker(game_queue, model_state_dict, config, disable_progress_bar=True):
     """Standalone worker function for parallel self-play"""
     try:
         # Create new model instance for this worker and force it to CPU
@@ -471,7 +471,7 @@ def self_play_worker(game_queue, model_state_dict, config):
         model.eval()  # Set to evaluation mode for self-play
         
         # Create a minimal trainer instance just for self-play
-        trainer = AlphaZeroTrainer(model, config, show_board=False, disable_progress_bar=True)
+        trainer = AlphaZeroTrainer(model, config, show_board=False, disable_progress_bar=disable_progress_bar)
         
         while True:
             try:
@@ -485,9 +485,10 @@ def self_play_worker(game_queue, model_state_dict, config):
         logger.error(f"Worker initialization error: {e}")
 
 class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
-    def __init__(self, model, config, num_workers=4, show_board=False):
-        super().__init__(model, config, show_board)
+    def __init__(self, model, config, num_workers=4, show_board=False, disable_progress_bar=True):
+        super().__init__(model, config, show_board, disable_progress_bar)
         self.num_workers = num_workers
+        self.disable_progress_bar = disable_progress_bar
 
     def parallel_self_play(self):
         """Execute self-play games in parallel"""
@@ -504,7 +505,7 @@ class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
         for i in range(self.num_workers):
             p = mp.Process(
                 target=self_play_worker,
-                args=(game_queue, cpu_state_dict, self.config)
+                args=(game_queue, cpu_state_dict, self.config, True if i != 0 else False)
             )
             p.start()
             workers.append(p)
