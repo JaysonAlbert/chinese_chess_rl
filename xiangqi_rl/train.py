@@ -14,6 +14,7 @@ from collections import deque
 import math
 import pygame
 from xiangqi_rl.visualize import XiangqiVisualizer
+import gc
 
 # Set start method to spawn
 if __name__ == '__main__':
@@ -62,8 +63,18 @@ class MCTS:
         to_col = index % 9
         return ((from_row, from_col), (to_row, to_col))
         
+    def clear_tree(self):
+        """Clear the search tree to free memory"""
+        self.Qsa.clear()
+        self.Nsa.clear()
+        self.Ns.clear()
+        self.Ps.clear()
+
     def search(self, env, debug=False):
         """Perform MCTS search"""
+        # Clear tree before each search to prevent memory buildup
+        self.clear_tree()
+        
         s = env.get_canonical_state()
         
         # Add progress bar for simulations
@@ -201,7 +212,7 @@ class AlphaZeroTrainer:
         self.model = model
         self.config = config
         self.show_board = show_board
-        num_sims = 50 if show_board else 200
+        num_sims = 50 if show_board else 100
         self.mcts = MCTS(model, num_simulations=num_sims, max_moves=200)
         self.optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
         self.replay_buffer = deque(maxlen=config.max_buffer_size)
@@ -258,6 +269,14 @@ class AlphaZeroTrainer:
             vis.draw_board()
         
         while not env.is_game_over:
+            # Periodically force garbage collection
+            if move_count % 10 == 0:
+                gc.collect()
+            
+            # Clear MCTS tree every 10 moves to prevent memory buildup
+            if move_count % 10 == 0:
+                self.mcts.clear_tree()
+            
             if vis:
                 # Handle Pygame events more frequently
                 for _ in range(10):  # Check events multiple times

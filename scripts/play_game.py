@@ -3,6 +3,7 @@ import os
 import platform
 import time
 import pandas as pd
+import argparse
 # Add project root directory to Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -76,7 +77,7 @@ def play_game(moves_str, delay=1.0, visualize=True):
                 pygame.display.flip()
             
             # Update game state after animation
-            state, reward, done, info = env.step((from_pos, to_pos))
+            env.step((from_pos, to_pos))
             
             if visualize:
                 # Draw final position and wait
@@ -84,7 +85,7 @@ def play_game(moves_str, delay=1.0, visualize=True):
                 pygame.display.flip()
                 pygame.time.wait(int(delay * 1000))
             
-            if done:
+            if env.is_game_over:
                 logger.info(f"Game over after {i} moves!")
                 logger.info(f"Winner: {'Red' if env.winner else 'Black'}" if env.winner is not None else "Draw")
                 if visualize:
@@ -102,9 +103,15 @@ def play_game(moves_str, delay=1.0, visualize=True):
         return False
 
 def main():
-    # Load games from CSV
-    csv_path = 'resources/xiangqi_games.csv'
-    df = load_games(csv_path)
+    # Set up argument parser
+    parser = argparse.ArgumentParser(description='Play Xiangqi games from a CSV file')
+    parser.add_argument('--game', type=str, default='resources/xiangqi_games.csv',
+                       help='Path to the CSV file containing games (default: resources/xiangqi_games.csv)')
+    
+    args = parser.parse_args()
+    
+    # Load games from CSV using provided path
+    df = load_games(args.game)
     if df is None:
         return
     
@@ -209,13 +216,13 @@ def play_recorded_game(game_file):
                             visualizer.move_start_time = current_time
                             
                             visualizer.animate_move(from_pos, to_pos)
-                            _, reward, done = env.step((from_pos, to_pos))
+                            state = env.step((from_pos, to_pos))
                             move_index += 1
                             waiting_for_next_move = True  # 设置等待状态
                             last_move_time = current_time  # 更新最后移动时间
                             
-                            if done:
-                                winner = "红方" if reward > 0 else "黑方"
+                            if env.is_game_over:
+                                winner = "红方" if env.winner else "黑方"
                                 print(f"游戏结束！{winner}获胜！")
                                 pygame.time.wait(3000)
                                 running = False
