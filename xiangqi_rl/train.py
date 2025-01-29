@@ -2,25 +2,18 @@ import torch
 import torch.optim as optim
 import torch.nn.functional as F
 from tqdm import tqdm
-import pygame
 import logging
 import numpy as np
 from xiangqi_rl.environment import XiangqiEnv
-from xiangqi_rl.agent import XiangqiAgent
-from xiangqi_rl.model import XiangqiHybridNet, get_device
-from xiangqi_rl.visualize import XiangqiVisualizer
-import pandas as pd
+from xiangqi_rl.model import XiangqiHybridNet
 import os
 from torch.utils.tensorboard import SummaryWriter
 import random
 import torch.multiprocessing as mp
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.amp import autocast
-import torch.distributed as dist
-from torch.amp import GradScaler
-from contextlib import nullcontext
-import threading
-from queue import Empty
+from collections import deque
+import math
+import pygame
+from xiangqi_rl.visualize import XiangqiVisualizer
 
 # Set start method to spawn
 if __name__ == '__main__':
@@ -35,448 +28,438 @@ logger = logging.getLogger(__name__)
 
 class TrainingConfig:
     """Training configuration and hyperparameters"""
-    def __init__(self, num_episodes=1000, batch_size=256, max_moves=2000):
-        self.num_episodes = num_episodes
+    def __init__(self, num_iterations=1000, num_selfplay_games=100, batch_size=256, 
+                 training_steps=1000, eval_interval=10, max_buffer_size=500000):
+        self.num_iterations = num_iterations
+        self.num_selfplay_games = num_selfplay_games
         self.batch_size = batch_size
-        self.max_moves = max_moves
-        self.training_iterations_per_episode = 4
-        self.epsilon_start = 1.0
-        self.epsilon_end = 0.1
-        self.epsilon_decay = 0.995
-        self.max_buffer_size = 500000
-        self.checkpoint_interval = 1000
-        self.log_interval = 10
-        self.gamma = 0.99
+        self.training_steps = training_steps
+        self.eval_interval = eval_interval
+        self.max_buffer_size = max_buffer_size
 
-class TrainingStats:
-    """Track training statistics"""
-    def __init__(self):
-        self.red_wins = 0
-        self.black_wins = 0
-        self.draws = 0
-        self.total_captures = 0
-        self.checks_made = 0
-        self.river_crosses = 0
-        self.moves_to_win = []
-        self.pieces_captured = {piece: 0 for piece in ['p', 'c', 'h', 'r', 'a', 'e', 'k']}
-        self.episode_rewards = []
-        self.episode_lengths = []
-        self.policy_losses = []
-        self.value_losses = []
-        self.running_reward = 0
-        self.best_reward = float('-inf')
-        self.best_win_rate = 0.0
-        self.total_games = 0
-        self.running_win_rate = 0.0
-
-    def update_win_rate(self):
-        """Calculate current win rate"""
-        if self.total_games > 0:
-            return self.red_wins / self.total_games
-        return 0.0
-
-class TrainingManager:
-    """Manages the training process"""
-    def __init__(self, config, model, visualize=False):
-        self.config = config
-        self.model = model.to(get_device())
-        self.agent = XiangqiAgent(model)
-        self.optimizer = optim.Adam(model.parameters(), lr=0.0003)
-        self.stats = TrainingStats()
-        self.replay_buffer = []
-        self.scaler = GradScaler() if torch.cuda.is_available() else None
-        self.writer = self._setup_tensorboard()
-        self.visualize = visualize
-        self.vis = XiangqiVisualizer(XiangqiEnv()) if visualize else None
+class MCTS:
+    """Monte Carlo Tree Search implementation"""
+    def __init__(self, model, num_simulations=800, c_puct=1.0, max_moves=200):
+        self.model = model
+        self.num_simulations = num_simulations
+        self.c_puct = c_puct
+        self.max_moves = max_moves  # Maximum moves per game
+        self.Qsa = {}  # stores Q values for state-action pairs
+        self.Nsa = {}  # stores visit counts for state-action pairs
+        self.Ns = {}   # stores visit count for states
+        self.Ps = {}   # stores initial policy (returned by neural network)
         
-    def _setup_tensorboard(self):
-        log_dir = "logs/tensorboard"
-        os.makedirs(log_dir, exist_ok=True)
-        return SummaryWriter(log_dir)
+    def _move_to_index(self, move):
+        """Convert move tuple ((from_row, from_col), (to_row, to_col)) to index"""
+        (from_row, from_col), (to_row, to_col) = move
+        return from_row * 9 * 90 + from_col * 90 + to_row * 9 + to_col
 
-    def train(self, use_multiprocess=False):
+    def _index_to_move(self, index):
+        """Convert index to move tuple"""
+        from_row = index // (9 * 90)
+        from_col = (index % (9 * 90)) // 90
+        to_row = (index % 90) // 9
+        to_col = index % 9
+        return ((from_row, from_col), (to_row, to_col))
+        
+    def search(self, env, debug=False):
+        """Perform MCTS search"""
+        s = env.get_canonical_state()
+        
+        # Add progress bar for simulations
+        pbar = tqdm(range(self.num_simulations), desc="MCTS", leave=False)
+        for i in pbar:
+            env_copy = env.clone()
+            if i % 10 == 0:
+                pbar.set_description(f"MCTS sim {i}/{self.num_simulations} Q:{self.Qsa.get((s,0), 0):.2f}")
+            self._simulate(env_copy, s, move_count=0, position_history=set())
+            
+        valid_moves = env.get_valid_moves()
+        if debug:
+            self.print_mcts_stats(env, s, valid_moves)
+        
+        # Calculate move probabilities
+        move_probs = np.zeros(self.model.policy_head[-1].out_features)
+        
+        # Log the visit counts for valid moves
+        total_visits = 0
+        for move in valid_moves:
+            move_idx = self._move_to_index(move)
+            visits = self.Nsa.get((s, move_idx), 0)
+            move_probs[move_idx] = visits
+            total_visits += visits
+            if visits > 0:
+                logger.debug(f"Move {move}: {visits} visits ({visits/total_visits*100:.1f}%)")
+        
+        # Normalize probabilities
+        if move_probs.sum() > 0:
+            move_probs /= move_probs.sum()
+            
+        return move_probs
+    
+    def _simulate(self, env, state, move_count=0, position_history=None):
+        """Simulate one instance of MCTS"""
+        if position_history is None:
+            position_history = set()
+            
+        # Check for repetition
+        current_position = env.get_canonical_state()
+        if current_position in position_history:
+            return 0.0  # Draw due to repetition
+        position_history.add(current_position)
+        
+        # Check termination conditions
+        if move_count >= self.max_moves:
+            # Return the value prediction from the neural network for this state
+            state_array = np.array([env.get_state()])
+            state_tensor = torch.FloatTensor(state_array).to(self.model.device)
+            with torch.no_grad():
+                _, value = self.model(state_tensor)
+            return -value.item()
+            
+        if env.is_game_over:
+            return -env.get_reward()
+            
+        if state not in self.Ps:
+            # Leaf node - evaluate position
+            state_array = np.array([env.get_state()])
+            state_tensor = torch.FloatTensor(state_array).to(self.model.device)
+            policy, value = self.model(state_tensor)
+            self.Ps[state] = torch.softmax(policy[0], dim=0).cpu().detach().numpy()
+            return -value.item()
+            
+        # Select action with highest UCB score
+        valid_moves = env.get_valid_moves()
+        if not valid_moves:  # If no valid moves, treat as game over
+            return -env.get_reward()
+            
+        cur_best = float('-inf')
+        best_act = None
+        
+        for move in valid_moves:
+            move_idx = self._move_to_index(move)
+            
+            q = self.Qsa.get((state, move_idx), 0)
+            n = self.Nsa.get((state, move_idx), 0)
+            p = self.Ps[state][move_idx]
+            
+            ucb = q + self.c_puct * p * math.sqrt(self.Ns.get(state, 0)) / (1 + n)
+            
+            if ucb > cur_best:
+                cur_best = ucb
+                best_act = move
+                best_idx = move_idx
+                
+        env.step(best_act)
+        v = self._simulate(env, env.get_canonical_state(), move_count + 1, position_history)
+        
+        # Update statistics
+        if (state, best_idx) in self.Qsa:
+            self.Qsa[(state, best_idx)] = (self.Nsa[(state, best_idx)] * self.Qsa[(state, best_idx)] + v) / (self.Nsa[(state, best_idx)] + 1)
+            self.Nsa[(state, best_idx)] += 1
+        else:
+            self.Qsa[(state, best_idx)] = v
+            self.Nsa[(state, best_idx)] = 1
+            
+        self.Ns[state] = self.Ns.get(state, 0) + 1
+        return -v
+
+    def print_mcts_stats(self, env, s, valid_moves):
+        """Print MCTS statistics for debugging"""
+        print("\nMCTS Statistics:")
+        print(f"Current player: {'Red' if env.current_player else 'Black'}")
+        print("\nTop moves by visit count:")
+        
+        # Collect move stats
+        move_stats = []
+        for move in valid_moves:
+            move_idx = self._move_to_index(move)
+            visits = self.Nsa.get((s, move_idx), 0)
+            q_value = self.Qsa.get((s, move_idx), 0)
+            prior = self.Ps[s][move_idx] if s in self.Ps else 0
+            
+            move_stats.append({
+                'move': move,
+                'visits': visits,
+                'Q': q_value,
+                'P': prior,
+                'N': visits
+            })
+        
+        # Sort by visit count
+        move_stats.sort(key=lambda x: x['visits'], reverse=True)
+        
+        # Print top 5 moves
+        for i, stat in enumerate(move_stats[:5]):
+            print(f"{i+1}. Move {stat['move']}: "
+                  f"N={stat['visits']} "
+                  f"Q={stat['Q']:.3f} "
+                  f"P={stat['P']:.3f}")
+
+class AlphaZeroTrainer:
+    def __init__(self, model, config, show_board=False):
+        self.model = model
+        self.config = config
+        self.show_board = show_board
+        num_sims = 50
+        self.mcts = MCTS(model, num_simulations=num_sims, max_moves=200)
+        self.optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
+        self.replay_buffer = deque(maxlen=config.max_buffer_size)
+        self.writer = SummaryWriter("logs/tensorboard")
+        
+        # Create games directory if it doesn't exist
+        self.games_dir = "logs/games"
+        os.makedirs(self.games_dir, exist_ok=True)
+        self.game_id = 0
+        
+    def _move_to_string(self, move):
+        """Convert move tuple to string format like '9,6,7,4'"""
+        (from_row, from_col), (to_row, to_col) = move
+        return f"{from_row},{from_col},{to_row},{to_col}"
+        
+    def save_game(self, moves, result):
+        """Save game to CSV file"""
+        self.game_id += 1
+        moves_str = " ".join(self._move_to_string(move) for move in moves)
+        
+        # Format result
+        if result == 1:
+            result_str = "红方胜"
+        elif result == -1:
+            result_str = "黑方胜"
+        else:
+            result_str = "和棋"
+            
+        # Get current date
+        from datetime import datetime
+        current_date = datetime.now().strftime("%Y.%m.%d")
+        
+        # Create or append to CSV file
+        csv_path = os.path.join(self.games_dir, "selfplay_games.csv")
+        if not os.path.exists(csv_path):
+            with open(csv_path, 'w', encoding='utf-8') as f:
+                f.write("game_id,moves,num_moves,event,date,red_player,black_player,result\n")
+                
+        with open(csv_path, 'a', encoding='utf-8') as f:
+            f.write(f'{self.game_id},"{moves_str}",{len(moves)},"AlphaZero自我对弈",'
+                   f'{current_date},"AI_Red","AI_Black",{result_str}\n')
+    
+    def self_play(self):
+        """Execute one episode of self-play"""
+        env = XiangqiEnv()
+        game_history = []
+        move_count = 0
+        moves = []  # Store moves for saving
+        
+        pbar = tqdm(desc="Self-play game", leave=False)
+        vis = None
+        if self.show_board:
+            vis = XiangqiVisualizer(env)
+            vis.draw_board()
+        
+        while not env.is_game_over:
+            if vis:
+                # Handle Pygame events more frequently
+                for _ in range(10):  # Check events multiple times
+                    for event in pygame.event.get():
+                        if event.type == pygame.QUIT:
+                            vis.close()
+                            return game_history
+                        elif event.type == pygame.KEYDOWN:
+                            if event.key == pygame.K_ESCAPE:
+                                vis.close()
+                                return game_history
+                    pygame.time.wait(10)  # Small delay to keep UI responsive
+            
+            move_count += 1
+            pbar.update(1)
+            pbar.set_description(f"Move {move_count}")
+            
+            # Get MCTS probabilities
+            pi = self.mcts.search(env)
+            
+            # Store state and MCTS probabilities
+            game_history.append([
+                env.get_state(),
+                pi,
+                env.current_player
+            ])
+            
+            # Select move (with temperature)
+            valid_moves = env.get_valid_moves()
+            valid_move_probs = []
+            valid_move_indices = []
+            
+            for move in valid_moves:
+                move_idx = self.mcts._move_to_index(move)
+                valid_move_probs.append(pi[move_idx])
+                valid_move_indices.append(move_idx)
+            
+            # Apply temperature
+            if len(game_history) < 30:
+                probs = [p ** (1/1.0) for p in valid_move_probs]
+            else:
+                probs = [p ** (1/0.5) for p in valid_move_probs]
+            
+            total = sum(probs)
+            if total > 0:
+                probs = [p/total for p in probs]
+                
+                # Select move
+                move_idx = np.random.choice(len(valid_moves), p=probs)
+                action = valid_moves[move_idx]
+                moves.append(action)  # Record the move
+                
+                if vis:
+                    vis.animate_move(action[0], action[1])
+                
+                # Log the selected move
+                logger.debug(f"Selected move {action} with probability {probs[move_idx]:.3f}")
+                
+                env.step(action)
+                if vis:
+                    vis.draw_board()
+        
+        pbar.close()
+        if vis:
+            vis.close()
+        
+        # Save game to CSV
+        value = env.get_reward()
+        self.save_game(moves, value)
+        
+        return [(state, pi, value * player) for state, pi, player in game_history]
+    
+    def train(self):
         """Main training loop"""
         try:
-            self._train_singleprocess()
+            for iteration in tqdm(range(self.config.num_iterations), desc="Training"):
+                # Self-play phase
+                for _ in range(self.config.num_selfplay_games):
+                    game_history = self.self_play()
+                    self.replay_buffer.extend(game_history)
+                
+                # Training phase
+                if len(self.replay_buffer) >= self.config.batch_size:
+                    for _ in range(self.config.training_steps):
+                        batch = random.sample(self.replay_buffer, self.config.batch_size)
+                        policy_loss, value_loss = self.train_on_batch(batch)
+                        
+                        # Log losses
+                        self.writer.add_scalar('Loss/Policy', policy_loss, iteration)
+                        self.writer.add_scalar('Loss/Value', value_loss, iteration)
+                
+                # Evaluation phase
+                if iteration % self.config.eval_interval == 0:
+                    self.evaluate()
+                    
+                # Save checkpoint
+                if iteration % 100 == 0:
+                    self.save_checkpoint(iteration)
+                    
         except KeyboardInterrupt:
-            self._handle_interrupt()
+            logger.info("Training interrupted, saving checkpoint...")
+            self.save_checkpoint("interrupted")
         finally:
-            self._cleanup()
-
-    def _train_singleprocess(self):
-        env = XiangqiEnv()
-        pbar = tqdm(range(self.config.num_episodes), desc='Training (SP)')
+            self.writer.close()
+    
+    def train_on_batch(self, batch):
+        """Train on a batch of data"""
+        states, pis, values = zip(*batch)
+        # Convert to numpy arrays first
+        states = np.array(states)
+        pis = np.array(pis)
+        values = np.array(values)
         
-        for episode in pbar:
-            result = self._run_episode(env)
-            self._process_episode_result(result, episode)
-            self._periodic_logging(episode)
-            self._save_checkpoints(episode)
-
-    def _process_episode_result(self, result, episode):
-        """Process results from a single episode"""
-        try:
-            episode_data, move_count, is_game_over, final_reward, info = result
-            
-            # Update replay buffer with thread safety
-            with threading.Lock():
-                self.replay_buffer.extend(episode_data)
-                if len(self.replay_buffer) > self.config.max_buffer_size:
-                    self.replay_buffer = self.replay_buffer[-self.config.max_buffer_size:]
-            
-            # Train on batches
-            if len(self.replay_buffer) >= self.config.batch_size:
-                self._train_on_batch()
-            
-            # Update statistics
-            self._update_stats(final_reward, move_count, is_game_over, info)
-            
-            # Log metrics
-            self._log_metrics(episode, final_reward, move_count)
-        except Exception as e:
-            logger.error(f"Error processing episode result: {e}")
-
-    def _train_on_batch(self):
-        """Perform one training iteration on a batch of data"""
-        indices = np.random.choice(len(self.replay_buffer), 
-                                 self.config.batch_size, replace=False)
-        batch_data = [self.replay_buffer[i] for i in indices]
+        # Then convert to tensors
+        states = torch.FloatTensor(states).to(self.model.device)
+        pis = torch.FloatTensor(pis).to(self.model.device)
+        values = torch.FloatTensor(values).to(self.model.device)
         
-        p_loss, v_loss = optimize_model_mixed_precision(
-            self.model, self.optimizer, batch_data, 
-            self.agent, self.scaler
-        )
+        # Get predictions
+        policy_logits, value_preds = self.model(states)
         
-        self.stats.policy_losses.append(p_loss)
-        self.stats.value_losses.append(v_loss)
-
-    def _update_stats(self, final_reward, move_count, is_game_over, info):
-        """Update training statistics"""
-        self.stats.running_reward = (0.95 * self.stats.running_reward + 
-                                   0.05 * final_reward)
+        # Calculate losses
+        policy_loss = -torch.mean(torch.sum(pis * F.log_softmax(policy_logits, dim=1), dim=1))
+        value_loss = F.mse_loss(value_preds.squeeze(), values)
+        total_loss = policy_loss + value_loss
         
-        # Increment total games when a game ends
-        self.stats.total_games += 1
+        # Optimize
+        self.optimizer.zero_grad()
+        total_loss.backward()
+        self.optimizer.step()
+    
+        return policy_loss.item(), value_loss.item()
+
+    def evaluate(self):
+        """Evaluate the current model strength"""
+        # TODO: Implement evaluation against a fixed opponent or previous version
+        pass
         
-        if info['winner'] == True:
-            self.stats.red_wins += 1
-        elif info['winner'] == False:
-            self.stats.black_wins += 1
-        else:
-            self.stats.draws += 1
-            
-            # Update running win rate
-        self.stats.running_win_rate = self.stats.update_win_rate()
-
-    def _cleanup(self):
-        """Cleanup resources"""
-        if self.visualize and self.vis:
-            self.vis.close()
-        self.writer.close()
-
-    def _run_episode(self, env, agent=None):
-        """Run a single episode"""
-        state = env.reset()
-        episode_data = []
-        move_count = 0
-        episode_reward = 0
-        
-        for move_count in range(self.config.max_moves):
-            valid_moves = env.get_valid_moves()
-            if not valid_moves:
-                # Game over - current player has no valid moves (checkmate or stalemate)
-                if env.is_in_check():
-                    episode_reward = -10.0  # Lost by checkmate
-                else:
-                    episode_reward = 0.0  # Draw by stalemate
-                break
-                
-            if env.is_game_over:
-                if env.is_in_check():
-                    episode_reward = 10.0  # Won by checkmate
-                break
-                
-            if agent is None:
-                action = self.agent.select_action(
-                    torch.FloatTensor(env._get_state()).to(self.model.device), 
-                    valid_moves, 
-                    temperature=1.0
-                )
-            else:
-                action = agent.select_action(
-                    torch.FloatTensor(env._get_state()), 
-                    valid_moves, 
-                    temperature=1.0
-                )
-            next_state, reward, done, info = env.step(action)
-            
-            if reward != 0:  # If a capture or check occurred
-                episode_reward += reward
-            
-            episode_data.append((env._get_state(), action, reward, done))
-            state = next_state
-            
-            if done:
-                logger.info(f"Game over. Episode reward: {episode_reward}, Winner: {info['winner']}")
-                break
-        
-        return episode_data, move_count, env.is_game_over, episode_reward, info
-
-    def _periodic_logging(self, episode):
-        """Log periodic training statistics"""
-        if episode % self.config.log_interval == 0:
-            avg_reward = np.mean(self.stats.episode_rewards[-self.config.log_interval:]) if self.stats.episode_rewards else 0
-            avg_length = np.mean(self.stats.episode_lengths[-self.config.log_interval:]) if self.stats.episode_lengths else 0
-            
-            self.writer.add_scalar('Training/Average_Reward', avg_reward, episode)
-            self.writer.add_scalar('Training/Average_Length', avg_length, episode)
-            self.writer.add_scalar('Training/Win_Rate', self.stats.running_win_rate, episode)
-            
-            logger.info(f"Episode {episode}")
-            logger.info(f"Running reward: {self.stats.running_reward:.2f}")
-            logger.info(f"Win rate: {self.stats.running_win_rate:.2%}")
-            logger.info(f"Total games: {self.stats.total_games}")
-            logger.info(f"Wins/Losses/Draws: {self.stats.red_wins}/{self.stats.black_wins}/{self.stats.draws}")
-            logger.info(f"Buffer size: {len(self.replay_buffer)}")
-            
-            if self.stats.policy_losses:
-                avg_policy_loss = np.mean(self.stats.policy_losses[-self.config.log_interval:])
-                avg_value_loss = np.mean(self.stats.value_losses[-self.config.log_interval:])
-                self.writer.add_scalar('Loss/Policy_Loss', avg_policy_loss, episode)
-                self.writer.add_scalar('Loss/Value_Loss', avg_value_loss, episode)
-
-    def _save_checkpoints(self, episode):
-        """Save periodic checkpoints"""
-        if episode > 0 and episode % self.config.checkpoint_interval == 0:
-            checkpoint_dir = "logs/checkpoints"
-            os.makedirs(checkpoint_dir, exist_ok=True)
-            checkpoint_path = os.path.join(checkpoint_dir, f"model_episode_{episode}.pt")
-            
-            torch.save({
-                'episode': episode,
-                'model_state_dict': self.model.state_dict(),
-                'optimizer_state_dict': self.optimizer.state_dict(),
-                'running_reward': self.stats.running_reward,
-                'stats': self.stats.__dict__,
-                'replay_buffer': self.replay_buffer,
-            }, checkpoint_path)
-            logger.info(f"Saved checkpoint to {checkpoint_path}")
-
-    def _handle_interrupt(self):
-        """Handle training interruption"""
-        logger.info("\nTraining interrupted, saving checkpoint...")
+    def save_checkpoint(self, iteration):
+        """Save model checkpoint"""
         checkpoint_dir = "logs/checkpoints"
         os.makedirs(checkpoint_dir, exist_ok=True)
-        interrupt_path = os.path.join(checkpoint_dir, "interrupted_model.pt")
+        checkpoint_path = os.path.join(checkpoint_dir, f"model_iteration_{iteration}.pt")
         
         torch.save({
+            'iteration': iteration,
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
-            'running_reward': self.stats.running_reward,
-            'stats': self.stats.__dict__,
-            'replay_buffer': self.replay_buffer,
-        }, interrupt_path)
-        logger.info(f"Saved interrupt checkpoint to {interrupt_path}")
+            'replay_buffer': list(self.replay_buffer),
+        }, checkpoint_path)
+        logger.info(f"Saved checkpoint to {checkpoint_path}")
 
-    def _log_metrics(self, episode, final_reward, move_count):
-        """Log training metrics"""
-        self.stats.episode_rewards.append(final_reward)
-        self.stats.episode_lengths.append(move_count)
-        
-        self.writer.add_scalar('Training/Episode_Reward', final_reward, episode)
-        self.writer.add_scalar('Training/Running_Reward', self.stats.running_reward, episode)
-        self.writer.add_scalar('Training/Episode_Length', move_count, episode)
-        self.writer.add_scalar('Training/Buffer_Size', len(self.replay_buffer), episode)
-
-def pretrain_on_database(model, database_path, num_epochs=10, batch_size=64):
-    """Pretrain the model on human games database"""
-    logger.info("Loading game database...")
-    games_df = pd.read_csv(database_path)
+def test_mcts():
+    """Test MCTS behavior"""
+    model = XiangqiHybridNet()
+    mcts = MCTS(model, num_simulations=200)
+    env = XiangqiEnv()
     
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    # Test initial position
+    print("Testing initial position...")
+    pi = mcts.search(env, debug=True)
     
-    for epoch in range(num_epochs):
-        total_loss = 0
-        num_batches = 0
-        
-        # 添加进度条
-        progress_bar = tqdm(games_df.iterrows(), total=len(games_df), 
-                          desc=f'Epoch {epoch+1}/{num_epochs}')
-        
-        for _, game in progress_bar:
-            env = XiangqiEnv()
-            moves = game['moves'].split()
-            
-            # 批量处理来提高训练效率
-            states = []
-            target_moves = []
-            
-            for move_str in moves:
-                try:
-                    # 添加错误处理
-                    from_pos = (int(move_str[1]), int(move_str[0]))
-                    to_pos = (int(move_str[3]), int(move_str[2]))
-                    
-                    state = env._get_state()
-                    states.append(state)
-                    target_moves.append(env._move_to_index((from_pos, to_pos)))
-                    
-                    # 当收集够一个批次时进行训练
-                    if len(states) == batch_size:
-                        # Convert to numpy array first
-                        states_array = np.array(states)
-                        state_tensor = torch.FloatTensor(states_array)
-                        target_moves_tensor = torch.LongTensor(target_moves)
-                        
-                        policy, value = model(state_tensor)
-                        policy_loss = F.cross_entropy(policy, target_moves_tensor)
-                        
-                        optimizer.zero_grad()
-                        policy_loss.backward()
-                        optimizer.step()
-                        
-                        total_loss += policy_loss.item()
-                        num_batches += 1
-                        
-                        # 清空批次
-                        states = []
-                        target_moves = []
-                    
-                    # 执行移动
-                    env.step((from_pos, to_pos))
-                    
-                except (ValueError, IndexError) as e:
-                    logger.warning(f"Skipping invalid move: {move_str}, error: {e}")
-                    continue
-            
-            # 处理剩余的数据
-            if states:
-                # Convert to numpy array first
-                states_array = np.array(states)
-                state_tensor = torch.FloatTensor(states_array)
-                target_moves_tensor = torch.LongTensor(target_moves)
-                
-                policy, value = model(state_tensor)
-                policy_loss = F.cross_entropy(policy, target_moves_tensor)
-                
-                optimizer.zero_grad()
-                policy_loss.backward()
-                optimizer.step()
-                
-                total_loss += policy_loss.item()
-                num_batches += 1
-        
-        avg_loss = total_loss / num_batches
-        logger.info(f"Epoch {epoch+1}/{num_epochs}, Average Loss: {avg_loss:.4f}")
+    # Test after a few moves
+    print("\nTesting after some moves...")
+    moves = [
+        ((6, 4), (5, 4)),  # Red pawn forward
+        ((3, 4), (4, 4)),  # Black pawn forward
+        ((7, 1), (5, 2)),  # Red cannon to attack
+    ]
+    for move in moves:
+        env.step(move)
+        print(f"\nAfter move {move}:")
+        pi = mcts.search(env, debug=True)
     
-    return model
-
-def optimize_model_mixed_precision(model, optimizer, batch_data, agent, scaler):
-    device = next(model.parameters()).device
-    states, actions, rewards, dones = zip(*batch_data)  # Add dones to batch data
-    
-    # Convert to tensors
-    state_tensor = torch.FloatTensor(np.array(states)).to(device)  # Convert to numpy array first
-    action_tensor = torch.LongTensor([agent._move_to_index(a) for a in actions]).to(device)
-    reward_tensor = torch.FloatTensor(rewards).to(device)
-    done_tensor = torch.BoolTensor(dones).to(device)
-    
-    # Only use autocast if CUDA is available
-    context = autocast(device_type='cuda') if torch.cuda.is_available() else nullcontext()
-    
-    with context:
-        policy, value = model(state_tensor)
-        
-        # Compute value targets using n-step returns
-        value_targets = compute_value_targets(reward_tensor, value.detach(), done_tensor, gamma=0.99)
-        
-        # Compute proper value targets using future returns
-        value_loss = torch.mean((value - value_targets) ** 2)
-        
-        # Policy loss using log probabilities
-        log_probs = F.log_softmax(policy, dim=1)
-        action_log_probs = log_probs.gather(1, action_tensor.unsqueeze(1))
-        policy_loss = -(action_log_probs * reward_tensor.unsqueeze(1)).mean()
-
-    # Optimize with gradient scaling if CUDA is available, otherwise normal optimization
-    optimizer.zero_grad(set_to_none=True)
-    if scaler is not None:
-        scaler.scale(policy_loss + value_loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
-    else:
-        (policy_loss + value_loss).backward()
-        optimizer.step()
-    
-    return policy_loss.item(), value_loss.item()
-
-def compute_value_targets(rewards, values, dones, gamma=0.99):
-    """
-    Compute value targets using n-step returns
-    Args:
-        rewards: tensor of rewards for the batch
-        values: tensor of value predictions
-        dones: tensor of done flags
-        gamma: discount factor
-    """
-    batch_size = rewards.size(0)
-    returns = torch.zeros_like(rewards)
-    
-    # Ensure all tensors have the same shape
-    values = values.squeeze()  # Remove extra dimensions if any
-    
-    # Initialize the return with the value of the last state if not done
-    next_return = torch.where(dones, torch.zeros_like(values), values)
-    
-    # Compute returns backwards
-    for t in reversed(range(batch_size)):
-        returns[t] = rewards[t] + gamma * next_return[t] * (1 - dones[t].float())
-        next_return[t] = returns[t]
-    
-    return returns.unsqueeze(1)  # Add back the dimension for consistency
-
-class PrioritizedReplayBuffer:
-    def __init__(self, capacity):
-        self.capacity = capacity
-        self.buffer = []
-        self.priorities = []
-        
-    def sample(self, batch_size):
-        probs = np.array(self.priorities) ** 0.6
-        probs = probs / np.sum(probs)
-        indices = np.random.choice(len(self.buffer), batch_size, p=probs)
-        return [self.buffer[idx] for idx in indices], indices
+    # Verify properties
+    print("\nVerifying MCTS properties:")
+    print(f"1. Total simulations: {sum(mcts.Nsa.values())}")
+    print(f"2. Number of explored states: {len(mcts.Ns)}")
+    print(f"3. Policy sum close to 1: {pi.sum():.6f}")
+    print(f"4. Max policy value: {pi.max():.6f}")
 
 if __name__ == "__main__":
     # Parse command line arguments
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--pretrain', action='store_true', help='Whether to pretrain on database')
-    parser.add_argument('--visualize', action='store_true', help='Whether to visualize training')
-    parser.add_argument('--episodes', type=int, default=64000, help='Number of episodes to train')
-    parser.add_argument('--max-moves', type=int, default=1000, help='Maximum moves per game')
-    parser.add_argument('--multiprocess', action='store_true', help='Whether to use multiprocessing')
+    parser.add_argument('--iterations', type=int, default=100)
+    parser.add_argument('--selfplay-games', type=int, default=100)
+    parser.add_argument('--show-board', action='store_true', help='Show the game board visualization')
+    parser.add_argument('--test-mcts', action='store_true', help='Run MCTS tests')
     args = parser.parse_args()
 
-    model = XiangqiHybridNet()
-    
-    if args.pretrain:
-        # You would need to provide a path to your games database
-        database_path = "xiangqi_games.csv"
-        try:
-            pretrained_model = pretrain_on_database(model, database_path)
-            logger.info("Pretraining completed. Starting reinforcement learning...")
-        except FileNotFoundError:
-            logger.warning("No game database found. Starting with untrained model...")
-            pretrained_model = model
+    if args.test_mcts:
+        test_mcts()
     else:
-        logger.info("Skipping pretraining. Starting with untrained model...")
-        pretrained_model = model
-    
-    # Then fine-tune with reinforcement learning
-    config = TrainingConfig(
-        num_episodes=args.episodes,
-        max_moves=args.max_moves
-    )
-    trainer = TrainingManager(config, pretrained_model, visualize=args.visualize)
-    trainer.train(use_multiprocess=args.multiprocess)
+        config = TrainingConfig(
+            num_iterations=args.iterations,
+            num_selfplay_games=args.selfplay_games,
+            batch_size=256,
+            training_steps=1000,
+            eval_interval=10
+        )
+        
+        model = XiangqiHybridNet()
+        trainer = AlphaZeroTrainer(model, config, show_board=args.show_board)
+        trainer.train()

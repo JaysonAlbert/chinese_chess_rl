@@ -6,33 +6,61 @@ def get_device():
     """Get the best available device (CUDA if available, else CPU)"""
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+class ResBlock(nn.Module):
+    def __init__(self, channels):
+        super(ResBlock, self).__init__()
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(channels)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(channels)
+
+    def forward(self, x):
+        identity = x
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = self.bn2(self.conv2(x))
+        x += identity
+        x = F.relu(x)
+        return x
+
 class XiangqiHybridNet(nn.Module):
-    def __init__(self):
+    def __init__(self, num_res_blocks=19, num_channels=256):
         super(XiangqiHybridNet, self).__init__()
         
         # Input channels: 14 (7 piece types * 2 colors)
         # Board size: 10 x 9
         
-        # Convolutional layers
-        self.conv1 = nn.Conv2d(14, 64, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
-        self.conv3 = nn.Conv2d(128, 256, kernel_size=3, padding=1)
+        # Initial processing
+        self.conv_input = nn.Sequential(
+            nn.Conv2d(14, num_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(num_channels),
+            nn.ReLU()
+        )
         
-        # Batch normalization layers
-        self.bn1 = nn.BatchNorm2d(64)
-        self.bn2 = nn.BatchNorm2d(128)
-        self.bn3 = nn.BatchNorm2d(256)
+        # Residual tower
+        self.res_blocks = nn.ModuleList([
+            ResBlock(num_channels) for _ in range(num_res_blocks)
+        ])
         
         # Policy head
-        self.policy_conv = nn.Conv2d(256, 32, kernel_size=1)
-        self.policy_bn = nn.BatchNorm2d(32)
-        self.policy_fc = nn.Linear(32 * 10 * 9, 90 * 90)  # All possible moves
+        self.policy_head = nn.Sequential(
+            nn.Conv2d(num_channels, 32, kernel_size=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.Flatten(),
+            nn.Linear(32 * 10 * 9, 90 * 90)  # All possible moves
+        )
         
         # Value head
-        self.value_conv = nn.Conv2d(256, 32, kernel_size=1)
-        self.value_bn = nn.BatchNorm2d(32)
-        self.value_fc1 = nn.Linear(32 * 10 * 9, 256)
-        self.value_fc2 = nn.Linear(256, 1)
+        self.value_head = nn.Sequential(
+            nn.Conv2d(num_channels, 32, kernel_size=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.Flatten(),
+            nn.Linear(32 * 10 * 9, 256),
+            nn.ReLU(),
+            nn.Linear(256, 1),
+            nn.Tanh()
+        )
         
         self.device = get_device()
         self.to(self.device)
@@ -41,24 +69,18 @@ class XiangqiHybridNet(nn.Module):
         # Ensure input is on the correct device
         x = x.to(self.device)
         
-        # Shared layers
-        x = F.relu(self.bn1(self.conv1(x)))
-        x = F.relu(self.bn2(self.conv2(x)))
-        x = F.relu(self.bn3(self.conv3(x)))
+        # Initial convolution
+        x = self.conv_input(x)
         
-        # Policy head
-        policy = F.relu(self.policy_bn(self.policy_conv(x)))
-        policy = policy.view(-1, 32 * 10 * 9)
-        policy = self.policy_fc(policy)
-        policy = F.log_softmax(policy, dim=1)
+        # Residual tower
+        for block in self.res_blocks:
+            x = block(x)
         
-        # Value head
-        value = F.relu(self.value_bn(self.value_conv(x)))
-        value = value.view(-1, 32 * 10 * 9)
-        value = F.relu(self.value_fc1(value))
-        value = torch.tanh(self.value_fc2(value))
+        # Policy and value heads
+        policy_logits = self.policy_head(x)
+        value = self.value_head(x)
         
-        return policy, value
+        return policy_logits, value
 
     def get_attention_weights(self, x):
         """Get attention weights for visualization"""

@@ -147,6 +147,195 @@ class XiangqiVisualizer:
     def create_default_piece_image(self, piece_type, is_red, filepath):
         """Create a default piece image if the image file doesn't exist"""
         size = self.square_size - 10
+        # Create surface with no alpha to avoid sRGB profile issues
+        surface = pygame.Surface((size, size))
+        surface.fill((255, 255, 255))  # White background
+        
+        # Draw circle border in black
+        pygame.draw.circle(surface, (0, 0, 0), (size//2, size//2), size//2, 2)
+        
+        # Chinese characters for pieces
+        red_pieces = {
+            'r': '車', 'h': '馬', 'e': '相', 'a': '仕', 
+            'k': '帥', 'c': '炮', 'p': '兵'
+        }
+        black_pieces = {
+            'r': '車', 'h': '馬', 'e': '象', 'a': '士',
+            'k': '將', 'c': '砲', 'p': '卒'
+        }
+        
+        # Draw piece symbol
+        color = self.RED if is_red else self.BLACK
+        symbol = red_pieces[piece_type] if is_red else black_pieces[piece_type]
+        
+        font_name = get_system_font()
+        if not font_name:
+            logger.warning("No suitable Chinese font found. Pieces may not display correctly.")
+        
+        font = pygame.font.SysFont(font_name, int(size * 0.7))
+        
+        try:
+            text = font.render(symbol, True, color)
+            text_rect = text.get_rect(center=(size//2, size//2))
+            surface.blit(text, text_rect)
+        except pygame.error as e:
+            logger.error(f"Error rendering piece text: {e}")
+            fallback_symbols = {'r': 'R', 'h': 'H', 'e': 'E', 'a': 'A', 
+                              'k': 'K', 'c': 'C', 'p': 'P'}
+            fallback_text = font.render(fallback_symbols[piece_type], True, color)
+            fallback_rect = fallback_text.get_rect(center=(size//2, size//2))
+            surface.blit(fallback_text, fallback_rect)
+        
+        # Save the image without alpha channel
+import pygame
+import numpy as np
+import os
+import platform
+import logging
+
+# Set up logger
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+def get_system_font():
+    system = platform.system()
+    if system == 'Windows':
+        fonts = [
+            'Microsoft YaHei',  # 微软雅黑
+            'SimHei',          # 中文黑体
+            'SimSun',          # 中文宋体
+            'KaiTi',           # 楷体
+            'NSimSun',         # 新宋体
+            'arial',
+            'helvetica'
+        ]
+    elif system == 'Linux':
+        fonts = [
+            'WenQuanYi Micro Hei',  # 文泉驿微米黑
+            'WenQuanYi Zen Hei',    # 文泉驿正黑
+            'Noto Sans CJK SC',     # Google Noto字体
+            'Noto Sans SC',
+            'DejaVuSans',
+            'FreeSans',
+            'Liberation Sans'
+        ]
+    else:  # MacOS
+        fonts = [
+            'PingFang SC',      # 苹方
+            'STHeiti',          # 华文黑体
+            'Hiragino Sans GB', # 冬青黑体
+            'Microsoft YaHei',  # 微软雅黑
+            'Arial Unicode MS',
+            'FreeSans',
+            'Arial'
+        ]
+    
+    available_fonts = [f.lower() for f in pygame.font.get_fonts()]
+    for font in fonts:
+        if font.lower().replace(' ', '') in available_fonts:
+            return font
+    return None
+        
+class XiangqiVisualizer:
+    def __init__(self, env, animation_duration=1000, debug=False):
+        """
+        Initialize the visualizer
+        Args:
+            env: The game environment
+            animation_duration: Duration of move animations in milliseconds (default: 1000)
+            debug: Whether to draw intersection points for debugging (default: False)
+        """
+        self.env = env
+        self.animation_duration = animation_duration
+        pygame.init()
+        self.square_size = 60
+        self.margin = 60  # Increase margin for better visibility of numbers
+        self.bottom_margin = 60  # Bottom margin for player text
+        # Width should be 8 spaces (9 lines)
+        self.width = 8 * self.square_size + 2 * self.margin
+        # Height should be 9 spaces (10 lines) plus extra space for numbers
+        self.height = 9 * self.square_size + 2 * self.margin + self.bottom_margin
+        self.screen = pygame.display.set_mode((self.width, self.height))
+        pygame.display.set_caption('Chinese Chess')
+        
+        # Colors
+        self.BACKGROUND = (255, 223, 162)
+        self.LINES = (0, 0, 0)
+        self.RED = (255, 0, 0)
+        self.BLACK = (0, 0, 0)
+        
+        # Load piece images
+        self.pieces_img = {}
+        self.load_pieces()
+        
+        # Font for UI elements
+        self.font = pygame.font.SysFont(get_system_font(), 36)
+        self.number_font = pygame.font.SysFont(get_system_font(), 24)  # Smaller font for numbers
+        self.river_font = pygame.font.SysFont(get_system_font(), 40)  # Larger font for river text
+        
+        # Add Chinese number mapping
+        self.chinese_numbers = {
+            1: "一", 2: "二", 3: "三", 4: "四", 5: "五",
+            6: "六", 7: "七", 8: "八", 9: "九"
+        }
+        
+        # 添加新的颜色定义
+        self.HIGHLIGHT_FROM = (0, 255, 0, 128)  # 起点高亮（半透明绿色）
+        self.HIGHLIGHT_TO = (255, 255, 0, 128)  # 终点高亮（半透明黄色）
+        self.MOVE_LINE = (0, 150, 255)  # 移动轨迹线（蓝色）
+        
+        # 修改动画相关属性
+        self.last_move = None
+        self.move_start_time = 0
+        self.MOVE_DURATION = 1000  # 增加到1秒 (原来是500毫秒)
+        self.MOVE_INTERVAL = 1000  # 每步移动之间的间隔时间(1秒)
+        self.debug = debug
+    
+    def close(self):
+        """Clean up pygame resources"""
+        pygame.quit()
+    
+    def load_pieces(self):
+        """Load piece images from the assets directory"""
+        # Create assets directory if it doesn't exist
+        assets_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets')
+        os.makedirs(assets_dir, exist_ok=True)
+        
+        # Define piece image filenames
+        piece_files = {
+            ('r', True): 'red_chariot.png',
+            ('h', True): 'red_horse.png',
+            ('e', True): 'red_elephant.png',
+            ('a', True): 'red_advisor.png',
+            ('k', True): 'red_general.png',
+            ('c', True): 'red_cannon.png',
+            ('p', True): 'red_pawn.png',
+            ('r', False): 'black_chariot.png',
+            ('h', False): 'black_horse.png',
+            ('e', False): 'black_elephant.png',
+            ('a', False): 'black_advisor.png',
+            ('k', False): 'black_general.png',
+            ('c', False): 'black_cannon.png',
+            ('p', False): 'black_pawn.png',
+        }
+        
+        # Create default piece images if they don't exist
+        for (piece_type, is_red), filename in piece_files.items():
+            filepath = os.path.join(assets_dir, filename)
+            if not os.path.exists(filepath):
+                self.create_default_piece_image(piece_type, is_red, filepath)
+            
+            # Load and scale the image
+            img = pygame.image.load(filepath)
+            img = pygame.transform.scale(img, (self.square_size - 10, self.square_size - 10))
+            self.pieces_img[(piece_type, is_red)] = img
+    
+    def create_default_piece_image(self, piece_type, is_red, filepath):
+        """Create a default piece image if the image file doesn't exist"""
+        size = self.square_size - 10
         surface = pygame.Surface((size, size), pygame.SRCALPHA)
         
         # Draw circle background

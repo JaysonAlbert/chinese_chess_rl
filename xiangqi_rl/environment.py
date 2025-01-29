@@ -372,6 +372,7 @@ class XiangqiEnv:
     def __init__(self):
         self.board = [[None for _ in range(9)] for _ in range(10)]
         self.current_player = True  # True for red, False for black
+        self.action_space_size = 90 * 90  # All possible moves (from any square to any square)
         self.reset()
     
     def reset(self):
@@ -601,80 +602,74 @@ class XiangqiEnv:
 
     def step(self, action):
         """Execute one step in the environment"""
-        from_pos, to_pos = action
-        from_row, from_col = from_pos
-        to_row, to_col = to_pos
-        
-        # Get the moving piece and validate it belongs to current player
+        (from_row, from_col), (to_row, to_col) = action
         piece = self.board[from_row][from_col]
-        if not piece or piece.is_red != self.current_player:
-            return self._get_state(), -1, False, {'winner': None}
+        target = self.board[to_row][to_col]
         
-        # Store the target piece before moving
-        target_piece = self.board[to_row][to_col]
-        
-        # Calculate intermediate rewards
-        reward = 0
-        
-        # Reward for capturing pieces (weighted by piece value)
-        piece_values = {
-            'p': 1,    # Pawn
-            'c': 4,    # Cannon
-            'h': 4,    # Horse
-            'r': 9,    # Rook
-            'e': 2,    # Elephant
-            'a': 2,    # Advisor
-            'k': 100   # King
-        }
-        
-        if target_piece:
-            reward += 0.1 * piece_values[target_piece.piece_type]
-        
-        # Small reward for checking opponent's king
-        self.board[to_row][to_col] = piece
+        # Move piece
         self.board[from_row][from_col] = None
+        self.board[to_row][to_col] = piece
         
-        if self.is_king_in_check(not self.current_player):
-            reward += 0.2
+        # Record captured piece
+        if target:
+            self.captured_pieces[target.is_red].append(target)
+            # Check if captured piece was a general/king
+            if target.piece_type == 'k':
+                self.is_game_over = True
+                self.winner = piece.is_red  # The player who captured the king wins
         
-        # Small reward for protecting own pieces
-        protected = self._get_protected_pieces((to_row, to_col))
-        reward += 0.05 * len(protected)
+        # Record move
+        self.last_move = action
+        self.history.append(action)
         
-        # Small reward for threatening opponent pieces
-        threatened = self._get_threatened_pieces((to_row, to_col))
-        reward += 0.05 * len(threatened)
-        
-        # Update current player
+        # Switch player
         self.current_player = not self.current_player
+        self.move_count += 1
         
-        # Check win conditions
-        info = {'winner': None}
-        done = False
+        # Check if current player has any valid moves
+        valid_moves = self.get_valid_moves()
+        if not valid_moves:
+            self.is_game_over = True
+            self.winner = not self.current_player  # Current player has no moves, so opponent wins
         
-        # 1. Check if a king was captured
-        if target_piece and target_piece.piece_type == 'k':
-            done = True
-            info['winner'] = not self.current_player  # Previous player wins
-            reward += 10  # Big reward for winning
+        # Check for general face-to-face
+        if self._generals_face_to_face():
+            self.is_game_over = True
+            self.winner = not self.current_player  # Previous player wins
         
-        # 2. Check if current player is in checkmate
-        elif self._is_checkmate():
-            done = True
-            info['winner'] = not self.current_player  # Previous player wins
-            reward += 10  # Big reward for winning
+        return self._get_state()
+
+    def _generals_face_to_face(self):
+        """Check if the two generals are facing each other directly"""
+        # Find positions of both generals
+        red_general_pos = None
+        black_general_pos = None
         
-        # 3. Check if it's a stalemate
-        elif self._is_stalemate():
-            done = True
-            info['winner'] = None  # Draw
-            reward += 0  # Neutral reward for draw
+        for i in range(10):
+            for j in range(9):
+                piece = self.board[i][j]
+                if piece and piece.piece_type == 'k':
+                    if piece.is_red:
+                        red_general_pos = (i, j)
+                    else:
+                        black_general_pos = (i, j)
         
-        # Small penalty for being in check
-        if self.is_king_in_check(self.current_player):
-            reward -= 0.3
+        if not (red_general_pos and black_general_pos):
+            return False
         
-        return self._get_state(), reward, done, info
+        # Check if they're in the same column
+        if red_general_pos[1] != black_general_pos[1]:
+            return False
+        
+        # Check if there are any pieces between them
+        start = min(red_general_pos[0], black_general_pos[0])
+        end = max(red_general_pos[0], black_general_pos[0])
+        
+        for i in range(start + 1, end):
+            if self.board[i][red_general_pos[1]]:
+                return False
+        
+        return True
 
     def is_king_in_check(self, is_red):
         """Check if the king of the given color is in check"""
@@ -817,4 +812,58 @@ class XiangqiEnv:
             target = self.board[to_row][to_col]
             if target and target.is_red == piece.is_red:
                 protected.append(target)
-        return protected 
+        return protected
+
+    def get_canonical_state(self):
+        """Get canonical form of the state (from current player's perspective)"""
+        state = self._get_state()
+        
+        if not self.current_player:  # If it's black's turn
+            # Flip the board vertically
+            state = np.flip(state, axis=1)
+            # Swap red and black piece channels
+            for i in range(7):
+                state[i], state[i+7] = np.copy(state[i+7]), np.copy(state[i])
+            # Flip the current player channel
+            state[13] = 1 - state[13]
+        
+        # Convert to immutable type for dictionary key
+        return tuple(map(tuple, state.reshape(-1, 9))) 
+
+    def clone(self):
+        """Create a deep copy of the environment"""
+        new_env = XiangqiEnv()
+        
+        # Copy board state
+        new_env.board = [[None for _ in range(9)] for _ in range(10)]
+        for i in range(10):
+            for j in range(9):
+                piece = self.board[i][j]
+                if piece:
+                    # Create new piece instance with same properties
+                    new_piece = type(piece)(piece.is_red)
+                    new_env.board[i][j] = new_piece
+        
+        # Copy other state variables
+        new_env.current_player = self.current_player
+        new_env.move_count = self.move_count
+        new_env.is_game_over = self.is_game_over
+        new_env.winner = self.winner
+        
+        # Don't need to copy history or captured pieces for MCTS simulation
+        
+        return new_env 
+
+    def get_state(self):
+        """Public method to get the current state"""
+        return self._get_state() 
+
+    def get_reward(self):
+        """Get the reward for the current state"""
+        if not self.is_game_over:
+            return 0
+        
+        if self.winner is None:  # Draw
+            return 0
+        # Return 1 for win, -1 for loss from current player's perspective
+        return 1 if self.winner == self.current_player else -1 
