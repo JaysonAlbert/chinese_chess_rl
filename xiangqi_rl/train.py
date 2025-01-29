@@ -29,12 +29,19 @@ logger = logging.getLogger(__name__)
 
 class TrainingConfig:
     """Training configuration and hyperparameters"""
-    def __init__(self, num_iterations=1000, num_selfplay_games=100, batch_size=256, 
-                 training_steps=1000, eval_interval=10, max_buffer_size=500000):
+    def __init__(self, 
+                 num_iterations=1000,
+                 games_per_iteration=100,    # Games to play per iteration
+                 min_buffer_size=10000,      # Min games before training starts
+                 batch_size=256,
+                 steps_per_iteration=1000,   # Training steps per iteration
+                 eval_interval=10, 
+                 max_buffer_size=500000):
         self.num_iterations = num_iterations
-        self.num_selfplay_games = num_selfplay_games
+        self.games_per_iteration = games_per_iteration
+        self.min_buffer_size = min_buffer_size
         self.batch_size = batch_size
-        self.training_steps = training_steps
+        self.steps_per_iteration = steps_per_iteration
         self.eval_interval = eval_interval
         self.max_buffer_size = max_buffer_size
 
@@ -355,50 +362,50 @@ class AlphaZeroTrainer:
         return [(state, pi, value * player) for state, pi, player in game_history]
     
     def train(self):
-        """Main training loop"""
+        """Main training loop more similar to AlphaGo Zero"""
         try:
             # Main training iterations
             for iteration in tqdm(range(self.config.num_iterations), desc="Training iterations"):
-                # Self-play phase
-                selfplay_pbar = tqdm(range(self.config.num_selfplay_games), 
+                # Self-play phase - collect games_per_iteration new games
+                selfplay_pbar = tqdm(range(self.config.games_per_iteration), 
                                    desc=f"Self-play games (iter {iteration})", 
                                    leave=False)
                 
                 for _ in selfplay_pbar:
                     game_history = self.self_play()
                     self.replay_buffer.extend(game_history)
-                    # Update progress bar with buffer size
                     selfplay_pbar.set_postfix({
-                        'buffer_size': len(self.replay_buffer),
-                        'last_game_len': len(game_history)
+                        'buffer_size': len(self.replay_buffer)
                     })
-                
-                # Training phase
-                if len(self.replay_buffer) >= self.config.batch_size:
-                    train_pbar = tqdm(range(self.config.training_steps), 
-                                    desc=f"Training steps (iter {iteration})", 
-                                    leave=False)
-                    
-                    for step in train_pbar:
-                        batch = random.sample(self.replay_buffer, self.config.batch_size)
-                        policy_loss, value_loss = self.train_on_batch(batch)
+
+                    # Start training once we have enough data
+                    if len(self.replay_buffer) >= self.config.min_buffer_size:
+                        # Do some training steps after each game
+                        train_steps = self.config.steps_per_iteration // self.config.games_per_iteration
+                        train_pbar = tqdm(range(train_steps), 
+                                        desc="Training steps", 
+                                        leave=False)
                         
-                        # Update progress bar with losses
-                        train_pbar.set_postfix({
-                            'policy_loss': f'{policy_loss:.3f}',
-                            'value_loss': f'{value_loss:.3f}'
-                        })
-                        
-                        # Log losses
-                        self.writer.add_scalar('Loss/Policy', policy_loss, iteration * self.config.training_steps + step)
-                        self.writer.add_scalar('Loss/Value', value_loss, iteration * self.config.training_steps + step)
+                        for step in train_pbar:
+                            batch = random.sample(self.replay_buffer, self.config.batch_size)
+                            policy_loss, value_loss = self.train_on_batch(batch)
+                            
+                            train_pbar.set_postfix({
+                                'p_loss': f'{policy_loss:.3f}',
+                                'v_loss': f'{value_loss:.3f}'
+                            })
+                            
+                            # Log losses
+                            step_idx = iteration * self.config.steps_per_iteration + step
+                            self.writer.add_scalar('Loss/Policy', policy_loss, step_idx)
+                            self.writer.add_scalar('Loss/Value', value_loss, step_idx)
                 
                 # Evaluation phase
                 if iteration % self.config.eval_interval == 0:
                     self.evaluate()
                     
                 # Save checkpoint
-                if iteration % 100 == 0:
+                if iteration % 10 == 0:
                     self.save_checkpoint(iteration)
                     
         except KeyboardInterrupt:
@@ -507,11 +514,11 @@ class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
         all_games = []
         
         # Only show progress bar in main process
-        pbar = tqdm(total=self.config.num_selfplay_games, 
+        pbar = tqdm(total=self.config.games_per_iteration, 
                    desc="Collecting parallel self-play games",
                    position=0)
         
-        while games_collected < self.config.num_selfplay_games:
+        while games_collected < self.config.games_per_iteration:
             try:
                 game_history = game_queue.get(timeout=300)  # 5 minute timeout
                 all_games.extend(game_history)
@@ -519,7 +526,7 @@ class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
                 pbar.update(1)
                 pbar.set_postfix({'collected': games_collected})
                 
-                if games_collected >= self.config.num_selfplay_games:
+                if games_collected >= self.config.games_per_iteration:
                     break
                     
             except Exception as e:
@@ -552,7 +559,7 @@ class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
                 
                 # Training phase
                 if len(self.replay_buffer) >= self.config.batch_size:
-                    train_pbar = tqdm(range(self.config.training_steps), 
+                    train_pbar = tqdm(range(self.config.steps_per_iteration), 
                                     desc=f"Training steps (iter {iteration})", 
                                     leave=False)
                     
@@ -566,15 +573,15 @@ class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
                         })
                         
                         self.writer.add_scalar('Loss/Policy', policy_loss, 
-                                             iteration * self.config.training_steps + step)
+                                             iteration * self.config.steps_per_iteration + step)
                         self.writer.add_scalar('Loss/Value', value_loss, 
-                                             iteration * self.config.training_steps + step)
+                                             iteration * self.config.steps_per_iteration + step)
                 
                 # Evaluation and checkpoint saving
                 if iteration % self.config.eval_interval == 0:
                     self.evaluate()
                     
-                if iteration % 100 == 0:
+                if iteration % 10 == 0:
                     self.save_checkpoint(iteration)
                     
         except KeyboardInterrupt:
@@ -635,9 +642,10 @@ if __name__ == "__main__":
     else:
         config = TrainingConfig(
             num_iterations=args.iterations,
-            num_selfplay_games=args.selfplay_games,
+            games_per_iteration=args.selfplay_games,
+            min_buffer_size=10000,
             batch_size=256,
-            training_steps=1000,
+            steps_per_iteration=1000,
             eval_interval=10
         )
         
