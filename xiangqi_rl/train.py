@@ -454,21 +454,22 @@ class AlphaZeroTrainer:
         }, checkpoint_path)
         logger.info(f"Saved checkpoint to {checkpoint_path}")
 
-# Add this function outside of any class
-def self_play_worker(game_queue, model_state_dict, config, device='cpu'):
+def self_play_worker(game_queue, model_state_dict, config):
     """Standalone worker function for parallel self-play"""
     try:
-        # Create new model instance for this worker
+        # Create new model instance for this worker and force it to CPU
         model = XiangqiHybridNet()
         model.load_state_dict(model_state_dict)
-        model = model.to(device)
+        model = model.to('cpu')
+        model.eval()  # Set to evaluation mode for self-play
         
-        # Create a minimal trainer instance just for self-play with progress bars disabled
+        # Create a minimal trainer instance just for self-play
         trainer = AlphaZeroTrainer(model, config, show_board=False, disable_progress_bar=True)
         
         while True:
             try:
-                game_history = trainer.self_play()
+                with torch.no_grad():  # Disable gradient computation during self-play
+                    game_history = trainer.self_play()
                 game_queue.put(game_history)
             except Exception as e:
                 logger.error(f"Error in self-play worker: {e}")
@@ -486,16 +487,17 @@ class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
         # Create a queue for collecting game results
         game_queue = mp.Queue()
         
-        # Get model state dict for workers
-        model_state_dict = self.model.state_dict()
+        # Get model state dict and move it to CPU for workers
+        cpu_state_dict = {k: v.cpu() for k, v in self.model.state_dict().items()}
         
         # Create worker processes
         workers = []
         logger.info(f"Starting {self.num_workers} worker processes...")
+        
         for i in range(self.num_workers):
             p = mp.Process(
                 target=self_play_worker,
-                args=(game_queue, model_state_dict, self.config)
+                args=(game_queue, cpu_state_dict, self.config)
             )
             p.start()
             workers.append(p)
