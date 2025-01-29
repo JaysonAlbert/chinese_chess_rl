@@ -40,11 +40,12 @@ class TrainingConfig:
 
 class MCTS:
     """Monte Carlo Tree Search implementation"""
-    def __init__(self, model, num_simulations=800, c_puct=1.0, max_moves=200):
+    def __init__(self, model, num_simulations=800, c_puct=1.0, max_moves=200, disable_progress_bar=False):
         self.model = model
         self.num_simulations = num_simulations
         self.c_puct = c_puct
         self.max_moves = max_moves  # Maximum moves per game
+        self.disable_progress_bar = disable_progress_bar
         self.Qsa = {}  # stores Q values for state-action pairs
         self.Nsa = {}  # stores visit counts for state-action pairs
         self.Ns = {}   # stores visit count for states
@@ -62,7 +63,7 @@ class MCTS:
         to_row = (index % 90) // 9
         to_col = index % 9
         return ((from_row, from_col), (to_row, to_col))
-        
+
     def clear_tree(self):
         """Clear the search tree to free memory"""
         self.Qsa.clear()
@@ -78,10 +79,10 @@ class MCTS:
         s = env.get_canonical_state()
         
         # Add progress bar for simulations
-        pbar = tqdm(range(self.num_simulations), desc="MCTS", leave=False)
-        for i in pbar:
+        pbar = None if self.disable_progress_bar else tqdm(range(self.num_simulations), desc="MCTS", leave=False)
+        for i in pbar if pbar else range(self.num_simulations):
             env_copy = env.clone()
-            if i % 10 == 0:
+            if pbar and i % 10 == 0:
                 pbar.set_description(f"MCTS sim {i}/{self.num_simulations} Q:{self.Qsa.get((s,0), 0):.2f}")
             self._simulate(env_copy, s, move_count=0, position_history=set())
             
@@ -208,12 +209,13 @@ class MCTS:
                   f"P={stat['P']:.3f}")
 
 class AlphaZeroTrainer:
-    def __init__(self, model, config, show_board=False):
+    def __init__(self, model, config, show_board=False, disable_progress_bar=False):
         self.model = model
         self.config = config
         self.show_board = show_board
-        num_sims = 50 if show_board else 100
-        self.mcts = MCTS(model, num_simulations=num_sims, max_moves=200)
+        self.disable_progress_bar = disable_progress_bar
+        num_sims = 50 if show_board else 200
+        self.mcts = MCTS(model, num_simulations=num_sims, max_moves=200, disable_progress_bar=disable_progress_bar)
         self.optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
         self.replay_buffer = deque(maxlen=config.max_buffer_size)
         self.writer = SummaryWriter("logs/tensorboard")
@@ -262,7 +264,8 @@ class AlphaZeroTrainer:
         move_count = 0
         moves = []  # Store moves for saving
         
-        pbar = tqdm(desc="Self-play game", leave=False)
+        # Only show progress bar if not disabled
+        pbar = None if self.disable_progress_bar else tqdm(desc="Self-play game", leave=False)
         vis = None
         if self.show_board:
             vis = XiangqiVisualizer(env)
@@ -291,8 +294,9 @@ class AlphaZeroTrainer:
                     pygame.time.wait(10)  # Small delay to keep UI responsive
             
             move_count += 1
-            pbar.update(1)
-            pbar.set_description(f"Move {move_count}")
+            if pbar is not None:
+                pbar.update(1)
+                pbar.set_description(f"Move {move_count}")
             
             # Get MCTS probabilities
             pi = self.mcts.search(env)
@@ -339,7 +343,8 @@ class AlphaZeroTrainer:
                 if vis:
                     vis.draw_board()
         
-        pbar.close()
+        if pbar is not None:
+            pbar.close()
         if vis:
             vis.close()
         
@@ -449,6 +454,133 @@ class AlphaZeroTrainer:
         }, checkpoint_path)
         logger.info(f"Saved checkpoint to {checkpoint_path}")
 
+# Add this function outside of any class
+def self_play_worker(game_queue, model_state_dict, config, device='cpu'):
+    """Standalone worker function for parallel self-play"""
+    try:
+        # Create new model instance for this worker
+        model = XiangqiHybridNet()
+        model.load_state_dict(model_state_dict)
+        model = model.to(device)
+        
+        # Create a minimal trainer instance just for self-play with progress bars disabled
+        trainer = AlphaZeroTrainer(model, config, show_board=False, disable_progress_bar=True)
+        
+        while True:
+            try:
+                game_history = trainer.self_play()
+                game_queue.put(game_history)
+            except Exception as e:
+                logger.error(f"Error in self-play worker: {e}")
+                break
+    except Exception as e:
+        logger.error(f"Worker initialization error: {e}")
+
+class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
+    def __init__(self, model, config, num_workers=4, show_board=False):
+        super().__init__(model, config, show_board)
+        self.num_workers = num_workers
+
+    def parallel_self_play(self):
+        """Execute self-play games in parallel"""
+        # Create a queue for collecting game results
+        game_queue = mp.Queue()
+        
+        # Get model state dict for workers
+        model_state_dict = self.model.state_dict()
+        
+        # Create worker processes
+        workers = []
+        logger.info(f"Starting {self.num_workers} worker processes...")
+        for i in range(self.num_workers):
+            p = mp.Process(
+                target=self_play_worker,
+                args=(game_queue, model_state_dict, self.config)
+            )
+            p.start()
+            workers.append(p)
+            
+        # Collect results
+        games_collected = 0
+        all_games = []
+        
+        # Only show progress bar in main process
+        pbar = tqdm(total=self.config.num_selfplay_games, 
+                   desc="Collecting parallel self-play games",
+                   position=0)
+        
+        while games_collected < self.config.num_selfplay_games:
+            try:
+                game_history = game_queue.get(timeout=300)  # 5 minute timeout
+                all_games.extend(game_history)
+                games_collected += 1
+                pbar.update(1)
+                pbar.set_postfix({'collected': games_collected})
+                
+                if games_collected >= self.config.num_selfplay_games:
+                    break
+                    
+            except Exception as e:
+                logger.error(f"Error collecting game results: {e}")
+                break
+                
+        pbar.close()
+        
+        # Terminate workers
+        logger.info("Terminating worker processes...")
+        for w in workers:
+            w.terminate()
+            w.join()
+            
+        return all_games
+
+    def train(self):
+        """Main training loop with parallel self-play"""
+        try:
+            # Main training iterations
+            for iteration in tqdm(range(self.config.num_iterations), desc="Training iterations"):
+                # Parallel self-play phase
+                game_histories = self.parallel_self_play()
+                
+                # Log the number of games collected
+                logger.info(f"Collected {len(game_histories)} game positions")
+                
+                self.replay_buffer.extend(game_histories)
+                logger.info(f"Replay buffer size: {len(self.replay_buffer)}")
+                
+                # Training phase
+                if len(self.replay_buffer) >= self.config.batch_size:
+                    train_pbar = tqdm(range(self.config.training_steps), 
+                                    desc=f"Training steps (iter {iteration})", 
+                                    leave=False)
+                    
+                    for step in train_pbar:
+                        batch = random.sample(self.replay_buffer, self.config.batch_size)
+                        policy_loss, value_loss = self.train_on_batch(batch)
+                        
+                        train_pbar.set_postfix({
+                            'policy_loss': f'{policy_loss:.3f}',
+                            'value_loss': f'{value_loss:.3f}'
+                        })
+                        
+                        self.writer.add_scalar('Loss/Policy', policy_loss, 
+                                             iteration * self.config.training_steps + step)
+                        self.writer.add_scalar('Loss/Value', value_loss, 
+                                             iteration * self.config.training_steps + step)
+                
+                # Evaluation and checkpoint saving
+                if iteration % self.config.eval_interval == 0:
+                    self.evaluate()
+                    
+                if iteration % 100 == 0:
+                    self.save_checkpoint(iteration)
+                    
+        except KeyboardInterrupt:
+            logger.info("Training interrupted, saving checkpoint...")
+            self.save_checkpoint("interrupted")
+        finally:
+            self.writer.close()
+
 def test_mcts():
     """Test MCTS behavior"""
     model = XiangqiHybridNet()
@@ -481,11 +613,19 @@ def test_mcts():
 if __name__ == "__main__":
     # Parse command line arguments
     import argparse
+    import multiprocessing as mp
+    
+    # Get CPU count and set default workers to 75% of available cores
+    default_workers = max(1, int(mp.cpu_count() * 0.75))
+    
     parser = argparse.ArgumentParser()
     parser.add_argument('--iterations', type=int, default=100)
     parser.add_argument('--selfplay-games', type=int, default=100)
     parser.add_argument('--show-board', action='store_true', help='Show the game board visualization')
     parser.add_argument('--test-mcts', action='store_true', help='Run MCTS tests')
+    parser.add_argument('--parallel', action='store_true', help='Use parallel training')
+    parser.add_argument('--num-workers', type=int, default=default_workers, 
+                       help=f'Number of parallel self-play workers (default: {default_workers})')
     args = parser.parse_args()
 
     if args.test_mcts:
@@ -500,5 +640,20 @@ if __name__ == "__main__":
         )
         
         model = XiangqiHybridNet()
-        trainer = AlphaZeroTrainer(model, config, show_board=args.show_board)
+        
+        if args.parallel:
+            model.share_memory()  # Enable model sharing between processes
+            trainer = ParallelAlphaZeroTrainer(
+                model, 
+                config, 
+                num_workers=args.num_workers,
+                show_board=args.show_board
+            )
+        else:
+            trainer = AlphaZeroTrainer(
+                model,
+                config,
+                show_board=args.show_board
+            )
+            
         trainer.train()
