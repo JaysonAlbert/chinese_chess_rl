@@ -572,7 +572,7 @@ class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
         try:
             while games_collected < self.config.games_per_iteration:
                 try:
-                    game_history = game_queue.get(timeout=1800)  # 5 minute timeout
+                    game_history = game_queue.get(timeout=3600)  # 5 minute timeout
                     all_games.extend(game_history)
                     games_collected += 1
                     pbar.update(1)
