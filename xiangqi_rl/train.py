@@ -111,6 +111,8 @@ class MCTS:
         if move_probs.sum() > 0:
             move_probs /= move_probs.sum()
             
+        # Add logging for search completion
+        logger.debug(f"MCTS search completed. Total visits: {total_visits}")
         return move_probs
     
     def _simulate(self, env, state, move_count=0, position_history=None):
@@ -273,6 +275,7 @@ class AlphaZeroTrainer:
     
     def self_play(self):
         """Execute one episode of self-play"""
+        logger.info("Starting new self-play game")
         env = XiangqiEnv()
         game_history = []
         move_count = 0
@@ -372,6 +375,8 @@ class AlphaZeroTrainer:
         value = env.get_reward()
         self.save_game(moves, value)
         
+        # Log game completion
+        logger.info(f"Game completed after {move_count} moves. Result: {env.get_reward()}")
         return [(state, pi, value * player) for state, pi, player in game_history]
     
     def train(self):
@@ -429,6 +434,9 @@ class AlphaZeroTrainer:
     
     def train_on_batch(self, batch):
         """Train on a batch of data"""
+        batch_size = len(batch)
+        logger.debug(f"Training on batch of size {batch_size}")
+        
         states, pis, values = zip(*batch)
         # Convert to numpy arrays first
         states = np.array(states)
@@ -515,6 +523,8 @@ class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
 
     def parallel_self_play(self):
         """Execute self-play games in parallel"""
+        logger.info(f"Starting parallel self-play with {self.num_workers} workers")
+        
         # Create a queue for collecting game results
         game_queue = mp.Queue()
         
@@ -571,10 +581,15 @@ class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
                     self.replay_buffer.extend(game_history)
                     current_buffer_size = len(self.replay_buffer)
                     
-                    pbar.set_postfix({
-                        'collected': games_collected,
-                        'buffer_size': current_buffer_size
-                    })
+                    logger.info(f"Collected game {games_collected}/{self.config.games_per_iteration}. "
+                              f"Buffer size: {current_buffer_size}")
+                    
+                    # Log memory usage periodically
+                    if games_collected % 10 == 0:
+                        process = psutil.Process()
+                        memory_info = process.memory_info()
+                        logger.info(f"Memory usage - RSS: {memory_info.rss / 1024 / 1024:.1f}MB, "
+                                  f"VMS: {memory_info.vms / 1024 / 1024:.1f}MB")
                     
                     # Start training if we have enough data
                     if current_buffer_size >= self.config.min_buffer_size:
@@ -601,7 +616,7 @@ class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
                         break
                         
                 except Exception as e:
-                    logger.error(f"Error collecting game results: {e}")
+                    logger.error(f"Error collecting game results: {e}", exc_info=True)
                     break
 
         finally:
@@ -613,30 +628,41 @@ class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
                 w.terminate()
                 w.join()
         
+            # Log cleanup
+            logger.info("Cleaning up parallel self-play resources")
+        
         return len(self.replay_buffer)
 
     def train(self):
         """Main training loop with parallel self-play"""
+        logger.info("Starting parallel training")
         try:
-            # Main training iterations
-            for iteration in tqdm(range(self.config.num_iterations), desc="Training iterations"):
-                # Parallel self-play phase and training
+            for iteration in tqdm(range(self.config.num_iterations)):
+                logger.info(f"\nStarting iteration {iteration}/{self.config.num_iterations}")
+                
+                # Log GPU memory if available
+                if torch.cuda.is_available():
+                    gpu_memory = torch.cuda.memory_allocated() / 1024 / 1024
+                    logger.info(f"GPU Memory allocated: {gpu_memory:.1f}MB")
+                
                 buffer_size = self.parallel_self_play()
+                logger.info(f"Iteration {iteration} completed. Final buffer size: {buffer_size}")
                 
-                # Log the buffer size
-                logger.info(f"Replay buffer size: {buffer_size}")
-                
-                # Evaluation and checkpoint saving
                 if iteration % self.config.eval_interval == 0:
+                    logger.info(f"Running evaluation at iteration {iteration}")
                     self.evaluate()
-                    
+                
                 if iteration % 10 == 0:
+                    logger.info(f"Saving checkpoint at iteration {iteration}")
                     self.save_checkpoint(iteration)
                     
         except KeyboardInterrupt:
-            logger.info("Training interrupted, saving checkpoint...")
+            logger.warning("Training interrupted by user")
             self.save_checkpoint("interrupted")
+        except Exception as e:
+            logger.error(f"Training error: {e}", exc_info=True)
         finally:
+            logger.info("Training completed")
             self.writer.close()
 
 def test_mcts():
