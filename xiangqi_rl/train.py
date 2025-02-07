@@ -27,7 +27,7 @@ class TrainingConfig:
     def __init__(self, 
                  num_iterations=1000,
                  games_per_iteration=100,    # Games to play per iteration
-                 min_buffer_size=10000,      # Min games before training starts
+                 min_buffer_size=5000,      # Min games before training starts
                  batch_size=256,
                  steps_per_iteration=1000,   # Training steps per iteration
                  eval_interval=10, 
@@ -52,6 +52,7 @@ class MCTS:
         self.Nsa = {}  # stores visit counts for state-action pairs
         self.Ns = {}   # stores visit count for states
         self.Ps = {}   # stores initial policy (returned by neural network)
+        self.policy_cache = {}  # Cache for policy predictions
         
     def _move_to_index(self, move):
         """Convert move tuple ((from_row, from_col), (to_row, to_col)) to index"""
@@ -67,11 +68,12 @@ class MCTS:
         return ((from_row, from_col), (to_row, to_col))
 
     def clear_tree(self):
-        """Clear the search tree to free memory"""
+        """Clear the search tree and cache to free memory"""
         self.Qsa.clear()
         self.Nsa.clear()
         self.Ns.clear()
         self.Ps.clear()
+        self.policy_cache.clear()
 
     def search(self, env, debug=False):
         """Perform MCTS search"""
@@ -116,31 +118,41 @@ class MCTS:
         if position_history is None:
             position_history = set()
             
-        # Check for repetition
+        # Early stopping for clearly won/lost positions
+        if move_count > 5:  # Only check after a few moves
+            if abs(env.get_reward()) == 1:  # Clear win/loss
+                return -env.get_reward()
+                
+        # Check for repetition or max moves
         current_position = env.get_canonical_state()
-        if current_position in position_history:
-            return 0.0  # Draw due to repetition
+        if current_position in position_history or move_count >= self.max_moves:
+            return 0.0  # Draw
+            
         position_history.add(current_position)
         
-        # Check termination conditions
-        if move_count >= self.max_moves:
-            # Return the value prediction from the neural network for this state
-            state_array = np.array([env.get_state()])
-            state_tensor = torch.FloatTensor(state_array).to(self.model.device)
-            with torch.no_grad():
-                _, value = self.model(state_tensor)
-            return -value.item()
-            
-        if env.is_game_over:
-            return -env.get_reward()
-            
         if state not in self.Ps:
+            # Use cached policy if available
+            if state in self.policy_cache:
+                self.Ps[state] = self.policy_cache[state]
+                return -self.policy_cache[state][1]  # Return cached value
+                
             # Leaf node - evaluate position
             state_array = np.array([env.get_state()])
             state_tensor = torch.FloatTensor(state_array).to(self.model.device)
-            policy, value = self.model(state_tensor)
-            self.Ps[state] = torch.softmax(policy[0], dim=0).cpu().detach().numpy()
-            return -value.item()
+            with torch.no_grad():
+                policy, value = self.model(state_tensor)
+            policy = torch.softmax(policy[0], dim=0).cpu().detach().numpy()
+            value = value.item()
+            
+            # Cache the results
+            self.Ps[state] = policy
+            self.policy_cache[state] = (policy, value)
+            
+            # Clear cache if too large
+            if len(self.policy_cache) > 10000:
+                self.policy_cache.clear()
+                
+            return -value
             
         # Select action with highest UCB score
         valid_moves = env.get_valid_moves()
@@ -216,7 +228,7 @@ class AlphaZeroTrainer:
         self.config = config
         self.show_board = show_board
         self.disable_progress_bar = disable_progress_bar
-        num_sims = 50 if show_board else 200
+        num_sims = 50 if show_board else 100
         self.mcts = MCTS(model, num_simulations=num_sims, max_moves=200, disable_progress_bar=disable_progress_bar)
         self.optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
         self.replay_buffer = deque(maxlen=config.max_buffer_size)
@@ -344,6 +356,12 @@ class AlphaZeroTrainer:
                 env.step(action)
                 if vis:
                     vis.draw_board()
+            
+            # Force draw after too many moves
+            if move_count >= 200:  # Max moves reached
+                logger.info("Game drawn due to move limit")
+                return [(state, pi, 0) for state, pi, player in game_history]
+            
         
         if pbar is not None:
             pbar.close()
@@ -537,7 +555,6 @@ class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
         games_collected = 0
         all_games = []
         
-        # Only show progress bar in main process
         pbar = tqdm(total=self.config.games_per_iteration, 
                     desc="Collecting parallel self-play games",
                     position=0)
@@ -545,21 +562,22 @@ class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
         try:
             while games_collected < self.config.games_per_iteration:
                 try:
-                    game_history = game_queue.get(timeout=300)  # 5 minute timeout
+                    game_history = game_queue.get(timeout=1800)  # 5 minute timeout
                     all_games.extend(game_history)
                     games_collected += 1
                     pbar.update(1)
+                    
+                    # Add games to replay buffer immediately instead of accumulating
+                    self.replay_buffer.extend(game_history)
+                    current_buffer_size = len(self.replay_buffer)
+                    
                     pbar.set_postfix({
                         'collected': games_collected,
-                        'buffer_size': len(self.replay_buffer) + len(all_games)
+                        'buffer_size': current_buffer_size
                     })
                     
                     # Start training if we have enough data
-                    if len(self.replay_buffer) + len(all_games) >= self.config.min_buffer_size:
-                        # Add collected games to replay buffer
-                        self.replay_buffer.extend(all_games)
-                        all_games = []  # Clear collected games
-                        
+                    if current_buffer_size >= self.config.min_buffer_size:
                         # Do some training steps
                         train_steps = self.config.steps_per_iteration // self.config.games_per_iteration
                         train_pbar = tqdm(range(train_steps), 
@@ -567,12 +585,17 @@ class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
                                         leave=False)
                         
                         for step in train_pbar:
-                            batch = random.sample(self.replay_buffer, self.config.batch_size)
+                            batch = random.sample(self.replay_buffer, min(self.config.batch_size, current_buffer_size))
                             policy_loss, value_loss = self.train_on_batch(batch)
                             train_pbar.set_postfix({
                                 'p_loss': f'{policy_loss:.3f}',
                                 'v_loss': f'{value_loss:.3f}'
                             })
+                            
+                            # Log losses
+                            step_idx = games_collected * train_steps + step
+                            self.writer.add_scalar('Loss/Policy', policy_loss, step_idx)
+                            self.writer.add_scalar('Loss/Value', value_loss, step_idx)
                     
                     if games_collected >= self.config.games_per_iteration:
                         break
@@ -580,6 +603,7 @@ class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
                 except Exception as e:
                     logger.error(f"Error collecting game results: {e}")
                     break
+
         finally:
             pbar.close()
             
@@ -588,10 +612,6 @@ class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
             for w in workers:
                 w.terminate()
                 w.join()
-        
-        # Add any remaining games to replay buffer
-        if all_games:
-            self.replay_buffer.extend(all_games)
         
         return len(self.replay_buffer)
 

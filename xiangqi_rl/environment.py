@@ -866,4 +866,4 @@ class XiangqiEnv:
         if self.winner is None:  # Draw
             return 0
         # Return 1 for win, -1 for loss from current player's perspective
-        return 1 if self.winner == self.current_player else -1 
+        return 1 if self.winner else -1 
