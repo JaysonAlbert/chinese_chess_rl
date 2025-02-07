@@ -31,7 +31,8 @@ class TrainingConfig:
                  batch_size=256,
                  steps_per_iteration=1000,   # Training steps per iteration
                  eval_interval=10, 
-                 max_buffer_size=500000):
+                 max_buffer_size=500000,
+                 max_moves=200):            # Maximum moves per game
         self.num_iterations = num_iterations
         self.games_per_iteration = games_per_iteration
         self.min_buffer_size = min_buffer_size
@@ -39,6 +40,7 @@ class TrainingConfig:
         self.steps_per_iteration = steps_per_iteration
         self.eval_interval = eval_interval
         self.max_buffer_size = max_buffer_size
+        self.max_moves = max_moves
 
 class MCTS:
     """Monte Carlo Tree Search implementation"""
@@ -231,7 +233,9 @@ class AlphaZeroTrainer:
         self.show_board = show_board
         self.disable_progress_bar = disable_progress_bar
         num_sims = 50 if show_board else 100
-        self.mcts = MCTS(model, num_simulations=num_sims, max_moves=200, disable_progress_bar=disable_progress_bar)
+        self.mcts = MCTS(model, num_simulations=num_sims, 
+                        max_moves=config.max_moves,  # Pass max_moves to MCTS
+                        disable_progress_bar=disable_progress_bar)
         self.optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
         self.replay_buffer = deque(maxlen=config.max_buffer_size)
         self.writer = SummaryWriter("logs/tensorboard")
@@ -336,10 +340,12 @@ class AlphaZeroTrainer:
                 valid_move_indices.append(move_idx)
             
             # Apply temperature
-            if len(game_history) < 30:
-                probs = [p ** (1/1.0) for p in valid_move_probs]
+            if len(game_history) < 30:  # First 30 moves
+                temperature = 1.2  # Higher temperature for more exploration
             else:
-                probs = [p ** (1/0.5) for p in valid_move_probs]
+                temperature = 0.5  # Lower temperature for better moves
+            
+            probs = [p ** (1/temperature) for p in valid_move_probs]
             
             total = sum(probs)
             if total > 0:
@@ -361,7 +367,7 @@ class AlphaZeroTrainer:
                     vis.draw_board()
             
             # Force draw after too many moves
-            if move_count >= 200:  # Max moves reached
+            if move_count >= self.config.max_moves:  # Use config max_moves
                 logger.info("Game drawn due to move limit")
                 return [(state, pi, 0) for state, pi, player in game_history]
             
@@ -438,23 +444,30 @@ class AlphaZeroTrainer:
         logger.debug(f"Training on batch of size {batch_size}")
         
         states, pis, values = zip(*batch)
-        # Convert to numpy arrays first
         states = np.array(states)
         pis = np.array(pis)
         values = np.array(values)
         
-        # Then convert to tensors
         states = torch.FloatTensor(states).to(self.model.device)
         pis = torch.FloatTensor(pis).to(self.model.device)
         values = torch.FloatTensor(values).to(self.model.device)
         
-        # Get predictions
         policy_logits, value_preds = self.model(states)
         
-        # Calculate losses
+        # Add temperature to policy
+        temperature = 1.0
+        policy_logits = policy_logits / temperature
+        
         policy_loss = -torch.mean(torch.sum(pis * F.log_softmax(policy_logits, dim=1), dim=1))
         value_loss = F.mse_loss(value_preds.squeeze(), values)
-        total_loss = policy_loss + value_loss
+        
+        # Add L2 regularization
+        l2_lambda = 1e-4
+        l2_reg = torch.tensor(0.).to(self.model.device)
+        for param in self.model.parameters():
+            l2_reg += torch.norm(param)
+        
+        total_loss = policy_loss + value_loss + l2_lambda * l2_reg
         
         # Optimize
         self.optimizer.zero_grad()
@@ -499,7 +512,8 @@ def self_play_worker(game_queue, model_state_dict, config, disable_progress_bar=
         torch.set_grad_enabled(False)
         
         # Create a minimal trainer instance just for self-play
-        trainer = AlphaZeroTrainer(model, config, show_board=False, disable_progress_bar=disable_progress_bar)
+        trainer = AlphaZeroTrainer(model, config, show_board=False, 
+                                 disable_progress_bar=disable_progress_bar)
         
         while True:
             try:
@@ -710,6 +724,8 @@ if __name__ == "__main__":
     parser.add_argument('--parallel', action='store_true', help='Use parallel training')
     parser.add_argument('--num-workers', type=int, default=default_workers, 
                        help=f'Number of parallel self-play workers (default: {default_workers})')
+    parser.add_argument('--max-moves', type=int, default=200,
+                       help='Maximum number of moves per game before forcing a draw')
     args = parser.parse_args()
 
     if args.test_mcts:
@@ -721,7 +737,8 @@ if __name__ == "__main__":
             min_buffer_size=10000,
             batch_size=256,
             steps_per_iteration=1000,
-            eval_interval=10
+            eval_interval=10,
+            max_moves=args.max_moves  # Use the command line argument
         )
         
         model = XiangqiHybridNet()

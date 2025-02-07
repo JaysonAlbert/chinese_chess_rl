@@ -369,10 +369,11 @@ class Pawn(Piece):
         return None
 
 class XiangqiEnv:
-    def __init__(self):
+    def __init__(self, max_moves=200):
         self.board = [[None for _ in range(9)] for _ in range(10)]
         self.current_player = True  # True for red, False for black
         self.action_space_size = 90 * 90  # All possible moves (from any square to any square)
+        self.max_moves = max_moves
         self.reset()
     
     def reset(self):
@@ -637,6 +638,11 @@ class XiangqiEnv:
             self.is_game_over = True
             self.winner = not self.current_player  # Previous player wins
         
+        # Force draw after too many moves
+        if self.move_count >= self.max_moves:  # Use instance variable
+            self.is_game_over = True
+            self.winner = None  # Draw
+        
         return self._get_state()
 
     def _generals_face_to_face(self):
@@ -832,7 +838,7 @@ class XiangqiEnv:
 
     def clone(self):
         """Create a deep copy of the environment"""
-        new_env = XiangqiEnv()
+        new_env = XiangqiEnv(max_moves=self.max_moves)  # Pass max_moves to new instance
         
         # Copy board state
         new_env.board = [[None for _ in range(9)] for _ in range(10)]
@@ -866,4 +872,4 @@ class XiangqiEnv:
         if self.winner is None:  # Draw
             return 0
         # Return 1 for win, -1 for loss from current player's perspective
-        return 1 if self.winner else -1 
+        return 1 if self.winner == self.current_player else -1 
