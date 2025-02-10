@@ -251,6 +251,11 @@ class AlphaZeroTrainer:
         os.makedirs(self.games_dir, exist_ok=True)
         self.game_id = 0
         
+        # Add path for best model
+        self.best_model_path = "logs/checkpoints/best_model.pt"
+        self.best_model = None
+        self.load_best_model()  # Load best model if exists
+
     def _move_to_string(self, move):
         """Convert move tuple to string format like '9,6,7,4'"""
         (from_row, from_col), (to_row, to_col) = move
@@ -496,11 +501,82 @@ class AlphaZeroTrainer:
     
         return policy_loss.item(), value_loss.item()
 
+    def load_best_model(self):
+        """Load the best model if it exists"""
+        if os.path.exists(self.best_model_path):
+            self.best_model = XiangqiHybridNet(device=self.model.device)
+            self.best_model.load_state_dict(torch.load(self.best_model_path))
+            logger.info("Loaded best model from previous training")
+
     def evaluate(self):
-        """Evaluate the current model strength"""
-        # TODO: Implement evaluation against a fixed opponent or previous version
-        pass
+        """Evaluate current model against best model"""
+        if self.best_model is None:
+            # If no best model exists, save current model as best
+            torch.save(self.model.state_dict(), self.best_model_path)
+            self.best_model = XiangqiHybridNet(device=self.model.device)
+            self.best_model.load_state_dict(self.model.state_dict())
+            return
+
+        wins = 0
+        draws = 0
+        num_games = 10  # Number of evaluation games
         
+        for game in tqdm(range(num_games), desc="Evaluation games"):
+            # Play one game with current model as red, best model as black
+            result = self.play_evaluation_game(self.model, self.best_model)
+            if result == 1:  # Win for current model
+                wins += 1
+            elif result == 0:  # Draw
+                draws += 0.5
+
+            # Play one game with roles reversed
+            result = self.play_evaluation_game(self.best_model, self.model)
+            if result == -1:  # Win for current model (as black)
+                wins += 1
+            elif result == 0:  # Draw
+                draws += 0.5
+
+        win_rate = (wins + draws) / (num_games * 2)
+        logger.info(f"Evaluation complete - Win rate against best model: {win_rate:.2%}")
+
+        # If new model is significantly better, save it as best model
+        if win_rate > 0.55:  # 55% win rate threshold
+            torch.save(self.model.state_dict(), self.best_model_path)
+            self.best_model.load_state_dict(self.model.state_dict())
+            logger.info("New best model saved!")
+
+    def play_evaluation_game(self, red_player, black_player):
+        """Play a single evaluation game between two models"""
+        env = XiangqiEnv()
+        move_count = 0
+        
+        while not env.is_game_over and move_count < self.config.max_moves:
+            current_model = red_player if env.current_player else black_player
+            # Use lower number of MCTS simulations for faster evaluation
+            mcts = MCTS(current_model, num_simulations=400, 
+                       max_moves=self.config.max_moves,
+                       disable_progress_bar=True)
+            
+            pi = mcts.search(env)
+            valid_moves = env.get_valid_moves()
+            
+            # Select best move (no exploration during evaluation)
+            best_move = None
+            best_prob = -1
+            
+            for move in valid_moves:
+                move_idx = mcts._move_to_index(move)
+                if pi[move_idx] > best_prob:
+                    best_prob = pi[move_idx]
+                    best_move = move
+            
+            env.step(best_move)
+            move_count += 1
+
+        if move_count >= self.config.max_moves:
+            return 0  # Draw
+        return env.get_reward()
+
     def save_checkpoint(self, iteration):
         """Save model checkpoint"""
         checkpoint_dir = "logs/checkpoints"
