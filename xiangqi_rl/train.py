@@ -142,6 +142,8 @@ class MCTS:
                 
             # Leaf node - evaluate position
             state_array = np.array([env.get_canonical_state()])
+            # Reshape state array to match expected dimensions
+            state_array = state_array.reshape(1, 14, 10, 9)
             state_tensor = torch.FloatTensor(state_array).to(self.model.device)
             with torch.no_grad():
                 policy, value = self.model(state_tensor)
@@ -321,8 +323,10 @@ class AlphaZeroTrainer:
             pi = self.mcts.search(env)
             
             # Store canonical state and MCTS probabilities
+            state = env.get_canonical_state()
+            state = np.array(state).reshape(14, 10, 9)  # Reshape for consistency
             game_history.append([
-                env.get_canonical_state(),
+                state,
                 pi,
                 env.current_player
             ])
@@ -381,7 +385,12 @@ class AlphaZeroTrainer:
         
         # Log game completion
         logger.info(f"Game completed after {move_count} moves. Result: {env.get_reward()}")
-        return [(state, pi, value * player) for state, pi, player in game_history]
+        
+        # Convert game history to training data
+        # Each state gets the final game outcome as its value target
+        # value is +1 for win, -1 for loss from the perspective of the player who made the move
+        return [(state, pi, value * (1 if player == env.current_player else -1)) 
+                for state, pi, player in game_history]
     
     def train(self):
         """Main training loop more similar to AlphaGo Zero"""

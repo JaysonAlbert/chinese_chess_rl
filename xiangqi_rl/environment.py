@@ -1,5 +1,5 @@
 import numpy as np
-from logger import logger
+from xiangqi_rl.logger import logger
 
 class Piece:
     def __init__(self, piece_type, is_red):
@@ -618,29 +618,35 @@ class XiangqiEnv:
             # Check if captured piece was a general/king
             if target.piece_type == 'k':
                 self.is_game_over = True
-                self.winner = piece.is_red  # The player who captured the king wins
+                self.winner = self.current_player  # Current player wins
+                return self._get_state()
         
         # Record move
         self.last_move = action
         self.history.append(action)
         
-        # Switch player
+        # Switch player before checking game end conditions
         self.current_player = not self.current_player
-        self.move_count += 1
         
-        # Check if current player has any valid moves
+        # Check if next player has any valid moves
         valid_moves = self.get_valid_moves()
         if not valid_moves:
             self.is_game_over = True
-            self.winner = not self.current_player  # Current player has no moves, so opponent wins
+            self.winner = not self.current_player  # Previous player wins
+            self.current_player = not self.current_player  # Switch back for correct reward
+            return self._get_state()
         
         # Check for general face-to-face
         if self._generals_face_to_face():
             self.is_game_over = True
             self.winner = not self.current_player  # Previous player wins
+            self.current_player = not self.current_player  # Switch back for correct reward
+            return self._get_state()
+        
+        self.move_count += 1
         
         # Force draw after too many moves
-        if self.move_count >= self.max_moves:  # Use instance variable
+        if self.move_count >= self.max_moves:
             self.is_game_over = True
             self.winner = None  # Draw
         
@@ -879,6 +885,6 @@ class XiangqiEnv:
                     f"Current player: {'Red' if self.current_player else 'Black'}")
         
         # Return 1 for win, -1 for loss from current player's perspective
-        reward = 1 if self.winner == (not self.current_player) else -1
+        reward = 1 if self.winner == self.current_player else -1
         logger.debug(f"Reward: {reward}")
         return reward 
