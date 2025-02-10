@@ -14,12 +14,7 @@ import json
 from xiangqi_rl.visualize import XiangqiVisualizer
 import logging
 
-# Set up logger
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+from xiangqi_rl.logger import logger
 
 def load_games(csv_path):
     """Load games from CSV file"""

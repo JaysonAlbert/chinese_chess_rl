@@ -1,4 +1,5 @@
 import numpy as np
+from logger import logger
 
 class Piece:
     def __init__(self, piece_type, is_red):
@@ -870,6 +871,14 @@ class XiangqiEnv:
             return 0
         
         if self.winner is None:  # Draw
+            logger.debug("Game drawn")
             return 0
+        
+        # Add debug logging
+        logger.debug(f"Game over - Winner: {'Red' if self.winner else 'Black'}, "
+                    f"Current player: {'Red' if self.current_player else 'Black'}")
+        
         # Return 1 for win, -1 for loss from current player's perspective
-        return 1 if self.winner == self.current_player else -1 
+        reward = 1 if self.winner == (not self.current_player) else -1
+        logger.debug(f"Reward: {reward}")
+        return reward 

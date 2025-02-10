@@ -4,12 +4,7 @@ import os
 import platform
 import logging
 
-# Set up logger
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+from xiangqi_rl.logger import logger
 
 def get_system_font():
     system = platform.system()
@@ -193,12 +188,7 @@ import os
 import platform
 import logging
 
-# Set up logger
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+from xiangqi_rl.logger import logger
 
 def get_system_font():
     system = platform.system()

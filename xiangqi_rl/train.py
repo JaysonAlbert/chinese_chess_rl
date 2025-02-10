@@ -141,7 +141,7 @@ class MCTS:
                 return -self.policy_cache[state][1]  # Return cached value
                 
             # Leaf node - evaluate position
-            state_array = np.array([env.get_state()])
+            state_array = np.array([env.get_canonical_state()])
             state_tensor = torch.FloatTensor(state_array).to(self.model.device)
             with torch.no_grad():
                 policy, value = self.model(state_tensor)
@@ -250,18 +250,16 @@ class AlphaZeroTrainer:
         (from_row, from_col), (to_row, to_col) = move
         return f"{from_row},{from_col},{to_row},{to_col}"
         
-    def save_game(self, moves, result):
+    def save_game(self, moves, winner):
         """Save game to CSV file"""
         self.game_id += 1
         moves_str = " ".join(self._move_to_string(move) for move in moves)
         
-        # Format result
-        if result == 1:
-            result_str = "红方胜"
-        elif result == -1:
-            result_str = "黑方胜"
-        else:
+        # Get result string based on winner
+        if winner is None:  # Draw
             result_str = "和棋"
+        else:  # Win/Loss
+            result_str = "红方胜" if winner else "黑方胜"
             
         # Get current date
         from datetime import datetime
@@ -322,9 +320,9 @@ class AlphaZeroTrainer:
             # Get MCTS probabilities
             pi = self.mcts.search(env)
             
-            # Store state and MCTS probabilities
+            # Store canonical state and MCTS probabilities
             game_history.append([
-                env.get_state(),
+                env.get_canonical_state(),
                 pi,
                 env.current_player
             ])
@@ -379,7 +377,7 @@ class AlphaZeroTrainer:
         
         # Save game to CSV
         value = env.get_reward()
-        self.save_game(moves, value)
+        self.save_game(moves, env.winner)
         
         # Log game completion
         logger.info(f"Game completed after {move_count} moves. Result: {env.get_reward()}")
