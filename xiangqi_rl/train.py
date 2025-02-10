@@ -241,6 +241,10 @@ class AlphaZeroTrainer:
         self.optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
         self.replay_buffer = deque(maxlen=config.max_buffer_size)
         self.writer = SummaryWriter("logs/tensorboard")
+        # Add log interval and loss tracking for tensorboard
+        self.log_interval = 50  # Log every 50 training steps
+        self.policy_losses = []  # Track policy losses within interval
+        self.value_losses = []   # Track value losses within interval
         
         # Create games directory if it doesn't exist
         self.games_dir = "logs/games"
@@ -395,7 +399,6 @@ class AlphaZeroTrainer:
     def train(self):
         """Main training loop more similar to AlphaGo Zero"""
         try:
-            # Main training iterations
             for iteration in tqdm(range(self.config.num_iterations), desc="Training iterations"):
                 # Self-play phase - collect games_per_iteration new games
                 selfplay_pbar = tqdm(range(self.config.games_per_iteration), 
@@ -421,15 +424,25 @@ class AlphaZeroTrainer:
                             batch = random.sample(self.replay_buffer, self.config.batch_size)
                             policy_loss, value_loss = self.train_on_batch(batch)
                             
+                            # Track losses
+                            self.policy_losses.append(policy_loss)
+                            self.value_losses.append(value_loss)
+                            
                             train_pbar.set_postfix({
                                 'p_loss': f'{policy_loss:.3f}',
                                 'v_loss': f'{value_loss:.3f}'
                             })
                             
-                            # Log losses
+                            # Log average losses every log_interval steps
                             step_idx = iteration * self.config.steps_per_iteration + step
-                            self.writer.add_scalar('Loss/Policy', policy_loss, step_idx)
-                            self.writer.add_scalar('Loss/Value', value_loss, step_idx)
+                            if step_idx % self.log_interval == 0 and self.policy_losses:
+                                avg_policy_loss = sum(self.policy_losses) / len(self.policy_losses)
+                                avg_value_loss = sum(self.value_losses) / len(self.value_losses)
+                                self.writer.add_scalar('Loss/Policy', avg_policy_loss, step_idx)
+                                self.writer.add_scalar('Loss/Value', avg_value_loss, step_idx)
+                                # Clear loss tracking lists
+                                self.policy_losses = []
+                                self.value_losses = []
                 
                 # Evaluation phase
                 if iteration % self.config.eval_interval == 0:
@@ -623,15 +636,26 @@ class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
                         for step in train_pbar:
                             batch = random.sample(self.replay_buffer, min(self.config.batch_size, current_buffer_size))
                             policy_loss, value_loss = self.train_on_batch(batch)
+                            
+                            # Track losses
+                            self.policy_losses.append(policy_loss)
+                            self.value_losses.append(value_loss)
+                            
                             train_pbar.set_postfix({
                                 'p_loss': f'{policy_loss:.3f}',
                                 'v_loss': f'{value_loss:.3f}'
                             })
                             
-                            # Log losses
+                            # Log average losses every log_interval steps
                             step_idx = games_collected * train_steps + step
-                            self.writer.add_scalar('Loss/Policy', policy_loss, step_idx)
-                            self.writer.add_scalar('Loss/Value', value_loss, step_idx)
+                            if step_idx % self.log_interval == 0 and self.policy_losses:
+                                avg_policy_loss = sum(self.policy_losses) / len(self.policy_losses)
+                                avg_value_loss = sum(self.value_losses) / len(self.value_losses)
+                                self.writer.add_scalar('Loss/Policy', avg_policy_loss, step_idx)
+                                self.writer.add_scalar('Loss/Value', avg_value_loss, step_idx)
+                                # Clear loss tracking lists
+                                self.policy_losses = []
+                                self.value_losses = []
                     
                     if games_collected >= self.config.games_per_iteration:
                         break
