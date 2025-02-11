@@ -43,16 +43,17 @@ class AIPlayer:
             print("No model path provided - Using untrained model")
         
         self.model.eval()
-        self.agent = XiangqiAgent(self.model)
+        # Initialize agent with MCTS search and pass the environment
+        self.agent = XiangqiAgent(self.model, self.env, num_simulations=100)
 
-    def get_action(self, state):
+    def get_action(self):
         """Get the AI's move based on the current state"""
         valid_moves = self.env.get_valid_moves()
         if not valid_moves:
             return None
             
-        # Use the agent to select an action
-        return self.agent.select_action(state, valid_moves, temperature=1.0)  # Higher temperature for more randomness
+        # Use the agent to select an action with MCTS
+        return self.agent.select_action(valid_moves, temperature=0.5)  # Lower temperature for stronger play
 
 def find_model():
     """Find a valid model in the checkpoints directory if no model path is provided"""
@@ -148,7 +149,7 @@ def main():
         # AI's turn
         if not env.current_player and not game_over:  # AI plays as black (False)
             state = env._get_state()
-            ai_move = ai_player.get_action(state)
+            ai_move = ai_player.get_action()
             if ai_move:
                 # Animate and execute move
                 visualizer.animate_move(*ai_move)

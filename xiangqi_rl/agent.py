@@ -1,47 +1,42 @@
 import torch
 import numpy as np
+from xiangqi_rl.train import MCTS
 
 class XiangqiAgent:
-    def __init__(self, model):
+    def __init__(self, model, env, num_simulations=100):
         self.model = model
+        self.env = env  # Use the environment passed from AIPlayer
+        self.mcts = MCTS(model, num_simulations=num_simulations)
     
-    def select_action(self, state, valid_moves, temperature=1.0):
-        """Select an action using the model's policy"""
+    def select_action(self, valid_moves, temperature=1.0):
+        """Select an action using MCTS search"""
         with torch.no_grad():
-            # Convert state to tensor
-            state_tensor = torch.FloatTensor(state).unsqueeze(0)
-            if torch.cuda.is_available():
-                state_tensor = state_tensor.cuda()
+            # Get move probabilities from MCTS
+            pi = self.mcts.search(self.env)
             
-            # Get policy from model
-            policy, _ = self.model(state_tensor)
-            policy = policy.squeeze(0)
-            
-            # Convert valid moves to indices
-            valid_indices = [self._move_to_index(move) for move in valid_moves]
-            
-            # Mask invalid moves
-            mask = torch.zeros_like(policy)
-            mask[valid_indices] = 1
-            policy = policy * mask
+            # Filter for valid moves only
+            valid_move_probs = []
+            for move in valid_moves:
+                move_idx = self.mcts._move_to_index(move)
+                valid_move_probs.append(pi[move_idx])
             
             # Apply temperature
             if temperature != 1.0:
-                policy = torch.pow(policy, 1.0/temperature)
-            
+                probs = [p ** (1/temperature) for p in valid_move_probs]
+            else:
+                probs = valid_move_probs
+                
             # Normalize probabilities
-            policy = policy / policy.sum()
+            total = sum(probs)
+            if total > 0:
+                probs = [p/total for p in probs]
+                
+                # Select move based on probabilities
+                move_idx = np.random.choice(len(valid_moves), p=probs)
+                return valid_moves[move_idx]
             
-            # Sample action
-            action_idx = torch.multinomial(policy, 1).item()
-            
-            # Convert back to board coordinates
-            for move in valid_moves:
-                if self._move_to_index(move) == action_idx:
-                    return move
-            
-            # Fallback to first valid move if something goes wrong
-            return valid_moves[0]
+            # Fallback to random move if something goes wrong
+            return np.random.choice(valid_moves)
     
     def _move_to_index(self, move):
         """Convert a move (from_pos, to_pos) to a single index"""

@@ -66,5 +66,5 @@ assets/*.png
 resources/parsed_games/*.json
 resources/games/*.txt
 checkpoints/*
-logs
+logs*/
 *.csv
