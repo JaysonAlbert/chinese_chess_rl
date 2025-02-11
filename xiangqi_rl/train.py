@@ -148,10 +148,18 @@ class MCTS:
             # Reshape state array to match expected dimensions
             state_array = state_array.reshape(1, 14, 10, 9)
             state_tensor = torch.FloatTensor(state_array).to(self.model.device)
+            
             with torch.no_grad():
                 policy, value = self.model(state_tensor)
-            policy = torch.softmax(policy[0], dim=0).cpu().detach().numpy()
-            value = value.item()
+                # Only move to CPU if we're not using GPU
+                if self.model.device == 'cpu':
+                    policy = torch.softmax(policy[0], dim=0).cpu().detach().numpy()
+                else:
+                    # Keep on GPU for faster operations
+                    policy = torch.softmax(policy[0], dim=0).detach()
+                    # Convert to numpy only when needed for specific operations
+                    policy = policy.cpu().numpy()
+                value = value.item()
             
             # Cache the results
             self.Ps[state] = policy
@@ -639,23 +647,35 @@ class AlphaZeroTrainer:
             logger.error(f"Error loading checkpoint: {e}")
             return False
 
-def self_play_worker(game_queue, model_state_dict, config, disable_progress_bar=True):
-    """Standalone worker function for parallel self-play"""
+def self_play_worker(game_queue, model_state_dict, config, device='cpu', disable_progress_bar=True):
     try:
-        # Create new model instance for this worker and explicitly configure for CPU
-        model = XiangqiHybridNet(device='cpu')
+        # Create new model instance for this worker with specified device
+        model = XiangqiHybridNet(device=device)
         model.load_state_dict(model_state_dict)
-        model.eval()  # Set to evaluation mode for self-play
+        model.eval()
         
-        # Force model to CPU mode and optimize for CPU operations
-        model = model.cpu()
-        torch.set_num_threads(1)  # Restrict to single thread per process
-        torch.set_num_interop_threads(1)
+        # Move model to specified device
+        model = model.to(device)
         
-        # Disable gradient computation permanently for this worker
+        if device == 'cpu':
+            # Optimize for CPU operations
+            torch.set_num_threads(1)
+            torch.set_num_interop_threads(1)
+        else:
+            # For GPU workers
+            torch.backends.cudnn.benchmark = True
+            torch.backends.cudnn.deterministic = False
+            # Set higher priority for GPU workers
+            try:
+                os.nice(-10)  # Give GPU workers higher priority
+            except:
+                pass
+            # Pin memory for faster GPU transfers
+            torch.cuda.set_device(int(device.split(':')[1]))
+            
+        # Disable gradient computation
         torch.set_grad_enabled(False)
         
-        # Create a minimal trainer instance just for self-play
         trainer = AlphaZeroTrainer(model, config, show_board=False, 
                                  disable_progress_bar=disable_progress_bar)
         
@@ -670,18 +690,37 @@ def self_play_worker(game_queue, model_state_dict, config, disable_progress_bar=
         logger.error(f"Worker initialization error: {e}")
 
 class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
-    def __init__(self, model, config, num_workers=4, show_board=False, disable_progress_bar=True):
+    def __init__(self, model, config, num_workers=4, gpu_workers=None, show_board=False, disable_progress_bar=True):
         super().__init__(model, config, show_board, disable_progress_bar)
         self.num_workers = num_workers
         self.disable_progress_bar = disable_progress_bar
         
-        # Set global PyTorch settings for the main process
-        torch.set_num_threads(1)
-        torch.set_num_interop_threads(1)
+        # Adjust worker distribution to prevent resource competition
+        if gpu_workers is None and torch.cuda.is_available():
+            if torch.cuda.device_count() == 1:
+                # For single GPU, use fewer CPU workers to avoid resource competition
+                self.gpu_workers = 1
+                self.cpu_workers = num_workers - 1  # Limit CPU workers
+            else:
+                # For multi-GPU, balance based on GPU count
+                self.gpu_workers = min(torch.cuda.device_count(), num_workers // 2)
+                self.cpu_workers = num_workers - self.gpu_workers
+        else:
+            self.gpu_workers = gpu_workers if torch.cuda.is_available() else 0
+            self.cpu_workers = num_workers - self.gpu_workers
+
+        # Set CUDA device for each GPU worker
+        self.gpu_devices = []
+        for i in range(self.gpu_workers):
+            self.gpu_devices.append(f'cuda:{i % torch.cuda.device_count()}')
+            
+        logger.info(f"GPU count: {torch.cuda.device_count()}")
+        logger.info(f"Initializing with {self.cpu_workers} CPU workers and {self.gpu_workers} GPU workers")
+        logger.info(f"GPU devices: {self.gpu_devices}")
 
     def parallel_self_play(self):
-        """Execute self-play games in parallel"""
-        logger.info(f"Starting parallel self-play with {self.num_workers} workers")
+        """Execute self-play games in parallel using both CPU and GPU"""
+        logger.info(f"Starting parallel self-play with {self.cpu_workers} CPU and {self.gpu_workers} GPU workers")
         
         # Create a queue for collecting game results
         game_queue = mp.Queue()
@@ -689,33 +728,43 @@ class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
         # Get model state dict and ensure it's on CPU with contiguous memory
         cpu_state_dict = {k: v.cpu().contiguous() for k, v in self.model.state_dict().items()}
         
-        # Create worker processes with explicit CPU affinity if possible
+        # Create worker processes
         workers = []
-        logger.info(f"Starting {self.num_workers} worker processes...")
+        logger.info("Starting worker processes...")
         
         try:
-            for i in range(self.num_workers):
+            # Start CPU workers
+            for i in range(self.cpu_workers):
                 p = mp.Process(
                     target=self_play_worker,
-                    args=(game_queue, cpu_state_dict, self.config, True if i != 0 else False)
+                    args=(game_queue, cpu_state_dict, self.config, 'cpu', True)
                 )
                 p.start()
                 
-                # Set CPU affinity for each worker process
-                worker_process = psutil.Process(p.pid)
-                # Assign each worker to a specific CPU core
-                worker_process.cpu_affinity([i % psutil.cpu_count()])
+                # Set CPU affinity if possible
+                try:
+                    worker_process = psutil.Process(p.pid)
+                    worker_process.cpu_affinity([i % psutil.cpu_count()])
+                except Exception as e:
+                    logger.warning(f"Could not set CPU affinity: {e}")
                 
                 workers.append(p)
-        except ImportError:
-            # Fall back to normal process creation if psutil is not available
-            for i in range(self.num_workers):
+            
+            # Start GPU workers
+            for i in range(self.gpu_workers):
+                gpu_device = self.gpu_devices[i]
                 p = mp.Process(
                     target=self_play_worker,
-                    args=(game_queue, cpu_state_dict, self.config, True if i != 0 else False)
+                    args=(game_queue, cpu_state_dict, self.config, gpu_device, False)
                 )
                 p.start()
                 workers.append(p)
+
+        except Exception as e:
+            logger.error(f"Error starting workers: {e}")
+            for w in workers:
+                w.terminate()
+            raise e
 
         # Collect results
         games_collected = 0
@@ -868,6 +917,8 @@ if __name__ == "__main__":
                        help='Resume training from latest checkpoint')
     parser.add_argument('--checkpoint', type=str,
                        help='Resume training from specific checkpoint file')
+    parser.add_argument('--gpu-workers', type=int, default=None,
+                       help='Number of GPU workers (default: 25% of total workers)')
     args = parser.parse_args()
 
     if args.test_mcts:
@@ -891,6 +942,7 @@ if __name__ == "__main__":
                 model, 
                 config, 
                 num_workers=args.num_workers,
+                gpu_workers=args.gpu_workers,
                 show_board=args.show_board
             )
         else:
