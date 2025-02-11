@@ -16,6 +16,9 @@ import pygame
 from xiangqi_rl.visualize import XiangqiVisualizer
 import gc
 from xiangqi_rl.logger import logger
+import glob
+import re
+import psutil
 
 # Set start method to spawn
 if __name__ == '__main__':
@@ -234,17 +237,16 @@ class AlphaZeroTrainer:
         self.config = config
         self.show_board = show_board
         self.disable_progress_bar = disable_progress_bar
-        num_sims = 50 if show_board else 100
+        num_sims = 50 if show_board else 200
         self.mcts = MCTS(model, num_simulations=num_sims, 
-                        max_moves=config.max_moves,  # Pass max_moves to MCTS
+                        max_moves=config.max_moves,  
                         disable_progress_bar=disable_progress_bar)
         self.optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
         self.replay_buffer = deque(maxlen=config.max_buffer_size)
         self.writer = SummaryWriter("logs/tensorboard")
-        # Add log interval and loss tracking for tensorboard
-        self.log_interval = 50  # Log every 50 training steps
-        self.policy_losses = []  # Track policy losses within interval
-        self.value_losses = []   # Track value losses within interval
+        
+        # Add global step counter for tensorboard
+        self.global_step = 0
         
         # Create games directory if it doesn't exist
         self.games_dir = "logs/games"
@@ -255,6 +257,11 @@ class AlphaZeroTrainer:
         self.best_model_path = "logs/checkpoints/best_model.pt"
         self.best_model = None
         self.load_best_model()  # Load best model if exists
+        
+        # Add checkpoint tracking
+        self.start_iteration = 0
+        self.checkpoint_dir = "logs/checkpoints"
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
 
     def _move_to_string(self, move):
         """Convert move tuple to string format like '9,6,7,4'"""
@@ -381,7 +388,6 @@ class AlphaZeroTrainer:
             if move_count >= self.config.max_moves:  # Use config max_moves
                 logger.info("Game drawn due to move limit")
                 return [(state, pi, 0) for state, pi, player in game_history]
-            
         
         if pbar is not None:
             pbar.close()
@@ -404,7 +410,8 @@ class AlphaZeroTrainer:
     def train(self):
         """Main training loop more similar to AlphaGo Zero"""
         try:
-            for iteration in tqdm(range(self.config.num_iterations), desc="Training iterations"):
+            # Start from the last saved iteration
+            for iteration in tqdm(range(self.start_iteration, self.config.num_iterations)):
                 # Self-play phase - collect games_per_iteration new games
                 selfplay_pbar = tqdm(range(self.config.games_per_iteration), 
                                    desc=f"Self-play games (iter {iteration})", 
@@ -454,7 +461,7 @@ class AlphaZeroTrainer:
                     self.evaluate()
                     
                 # Save checkpoint
-                if iteration % 10 == 0:
+                if iteration % 1 == 0:
                     self.save_checkpoint(iteration)
                     
         except KeyboardInterrupt:
@@ -499,6 +506,11 @@ class AlphaZeroTrainer:
         total_loss.backward()
         self.optimizer.step()
     
+        # Log losses directly to tensorboard using global step
+        self.writer.add_scalar('Loss/Policy', policy_loss.item(), self.global_step)
+        self.writer.add_scalar('Loss/Value', value_loss.item(), self.global_step)
+        self.global_step += 1
+        
         return policy_loss.item(), value_loss.item()
 
     def load_best_model(self):
@@ -588,8 +600,44 @@ class AlphaZeroTrainer:
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'replay_buffer': list(self.replay_buffer),
+            'global_step': self.global_step,  # Save global step
         }, checkpoint_path)
         logger.info(f"Saved checkpoint to {checkpoint_path}")
+
+    def load_checkpoint(self, checkpoint_path=None):
+        """Load the latest checkpoint or a specific checkpoint"""
+        if checkpoint_path is None:
+            # Find the latest checkpoint
+            checkpoints = glob.glob(os.path.join(self.checkpoint_dir, "model_iteration_*.pt"))
+            if not checkpoints:
+                logger.info("No checkpoints found, starting fresh training")
+                return False
+                
+            checkpoint_path = max(checkpoints, key=lambda x: int(re.search(r'iteration_(\d+)', x).group(1)))
+        
+        try:
+            logger.info(f"Loading checkpoint from {checkpoint_path}")
+            checkpoint = torch.load(checkpoint_path)
+            
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            self.start_iteration = checkpoint['iteration'] + 1
+            
+            # Restore replay buffer if it exists
+            if 'replay_buffer' in checkpoint:
+                self.replay_buffer = deque(checkpoint['replay_buffer'], maxlen=self.config.max_buffer_size)
+                logger.info(f"Restored replay buffer with {len(self.replay_buffer)} examples")
+            
+            # Restore global step counter
+            if 'global_step' in checkpoint:
+                self.global_step = checkpoint['global_step']
+            
+            logger.info(f"Resuming training from iteration {self.start_iteration}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error loading checkpoint: {e}")
+            return False
 
 def self_play_worker(game_queue, model_state_dict, config, disable_progress_bar=True):
     """Standalone worker function for parallel self-play"""
@@ -646,8 +694,6 @@ class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
         logger.info(f"Starting {self.num_workers} worker processes...")
         
         try:
-            import psutil  # For CPU affinity management
-            
             for i in range(self.num_workers):
                 p = mp.Process(
                     target=self_play_worker,
@@ -713,26 +759,11 @@ class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
                             batch = random.sample(self.replay_buffer, min(self.config.batch_size, current_buffer_size))
                             policy_loss, value_loss = self.train_on_batch(batch)
                             
-                            # Track losses
-                            self.policy_losses.append(policy_loss)
-                            self.value_losses.append(value_loss)
-                            
                             train_pbar.set_postfix({
                                 'p_loss': f'{policy_loss:.3f}',
                                 'v_loss': f'{value_loss:.3f}'
                             })
-                            
-                            # Log average losses every log_interval steps
-                            step_idx = games_collected * train_steps + step
-                            if step_idx % self.log_interval == 0 and self.policy_losses:
-                                avg_policy_loss = sum(self.policy_losses) / len(self.policy_losses)
-                                avg_value_loss = sum(self.value_losses) / len(self.value_losses)
-                                self.writer.add_scalar('Loss/Policy', avg_policy_loss, step_idx)
-                                self.writer.add_scalar('Loss/Value', avg_value_loss, step_idx)
-                                # Clear loss tracking lists
-                                self.policy_losses = []
-                                self.value_losses = []
-                    
+
                     if games_collected >= self.config.games_per_iteration:
                         break
                         
@@ -758,7 +789,8 @@ class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
         """Main training loop with parallel self-play"""
         logger.info("Starting parallel training")
         try:
-            for iteration in tqdm(range(self.config.num_iterations)):
+            # Start from the last saved iteration
+            for iteration in tqdm(range(self.start_iteration, self.config.num_iterations)):
                 logger.info(f"\nStarting iteration {iteration}/{self.config.num_iterations}")
                 
                 # Log GPU memory if available
@@ -773,9 +805,8 @@ class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
                     logger.info(f"Running evaluation at iteration {iteration}")
                     self.evaluate()
                 
-                if iteration % 10 == 0:
-                    logger.info(f"Saving checkpoint at iteration {iteration}")
-                    self.save_checkpoint(iteration)
+                logger.info(f"Saving checkpoint at iteration {iteration}")
+                self.save_checkpoint(iteration)
                     
         except KeyboardInterrupt:
             logger.warning("Training interrupted by user")
@@ -833,6 +864,10 @@ if __name__ == "__main__":
                        help=f'Number of parallel self-play workers (default: {default_workers})')
     parser.add_argument('--max-moves', type=int, default=200,
                        help='Maximum number of moves per game before forcing a draw')
+    parser.add_argument('--resume', action='store_true', 
+                       help='Resume training from latest checkpoint')
+    parser.add_argument('--checkpoint', type=str,
+                       help='Resume training from specific checkpoint file')
     args = parser.parse_args()
 
     if args.test_mcts:
@@ -845,13 +880,13 @@ if __name__ == "__main__":
             batch_size=256,
             steps_per_iteration=1000,
             eval_interval=10,
-            max_moves=args.max_moves  # Use the command line argument
+            max_moves=args.max_moves
         )
         
         model = XiangqiHybridNet()
         
         if args.parallel:
-            model.share_memory()  # Enable model sharing between processes
+            model.share_memory()
             trainer = ParallelAlphaZeroTrainer(
                 model, 
                 config, 
@@ -864,5 +899,9 @@ if __name__ == "__main__":
                 config,
                 show_board=args.show_board
             )
+
+        # Load checkpoint if requested
+        if args.resume or args.checkpoint:
+            trainer.load_checkpoint(args.checkpoint)
             
         trainer.train()
