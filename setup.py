@@ -18,6 +18,7 @@ setup(
         "playwright",
         "tensorboard",
         "psutil",
+        "matplotlib"
     ],
     python_requires=">=3.8",
     classifiers=[

@@ -9,6 +9,7 @@ import argparse
 import cProfile
 import pstats
 from datetime import datetime
+import torch.profiler
 
 # Add the project root directory to Python path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -93,39 +94,66 @@ def show_loading_screen(visualizer, message):
     pygame.display.flip()
 
 def run_with_profiler(func):
-    """Run the given function with profiler and save results"""
+    """Run the given function with torch profiler"""
     # Create a unique filename with timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    profile_path = os.path.join(project_root, 'logs', 'profiles', f'profile_{timestamp}.prof')
+    profile_dir = os.path.join(project_root, 'logs', 'profiles', timestamp)
     
     # Ensure profiles directory exists
-    os.makedirs(os.path.dirname(profile_path), exist_ok=True)
+    os.makedirs(profile_dir, exist_ok=True)
     
-    # Run the profiler
-    profiler = cProfile.Profile()
-    try:
-        profiler.enable()
+    # Determine if using CUDA based on args
+    using_cuda = ARGS.device == 'cuda' or (ARGS.device is None and torch.cuda.is_available())
+    
+    print("Running profiler...")
+    with torch.profiler.profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ],
+        record_shapes=True,
+        profile_memory=True,
+        with_stack=True,
+        with_flops=True,
+        with_modules=True,
+    ) as prof:
+        # Run the function once
         func()
-    finally:
-        profiler.disable()
+    
+    # Save results
+    try:
+        # Save trace file
+        trace_path = os.path.join(profile_dir, "trace.json")
+        prof.export_chrome_trace(trace_path)
         
-    # Save and print the stats
-    stats = pstats.Stats(profiler)
-    stats.sort_stats('cumulative')
-    
-    # Save detailed stats to file
-    stats.dump_stats(profile_path)
-    
-    # Print top 20 time-consuming functions
-    print("\nTop 20 time-consuming functions:")
-    stats.strip_dirs()
-    stats.sort_stats('cumulative').print_stats(20)
-    
-    print(f"\nDetailed profile saved to: {profile_path}")
-    print("To analyze the profile, you can use:")
-    print(f"python -m pstats {profile_path}")
-    print("or")
-    print(f"snakeviz {profile_path}")
+        # Print and save profiler results
+        print("\nTorch Profiler Results:")
+        table = prof.key_averages().table(
+            sort_by="cuda_time_total" if using_cuda else "cpu_time_total",
+            row_limit=20
+        )
+        print(table)
+        
+        # Save table to file
+        with open(os.path.join(profile_dir, "profiler_results.txt"), "w") as f:
+            f.write(str(table))
+            
+            # Add detailed memory stats
+            f.write("\n\nMemory Stats:\n")
+            f.write(prof.key_averages().table(
+                sort_by="self_cuda_memory_usage" if using_cuda else "self_cpu_memory_usage"
+            ))
+        
+        print(f"\nProfiling data saved to: {profile_dir}")
+        print("\nTo view the trace, you can:")
+        print("1. Open Chrome")
+        print("2. Go to chrome://tracing")
+        print(f"3. Load the trace file: {trace_path}")
+        print("\nDetailed results saved to:", os.path.join(profile_dir, "profiler_results.txt"))
+        
+    except Exception as e:
+        print(f"\nError saving profiler results: {e}")
+        print("Profile data may be incomplete")
 
 def main():
     # Parse command line arguments
