@@ -621,7 +621,19 @@ class AlphaZeroTrainer:
                 logger.info("No checkpoints found, starting fresh training")
                 return False
                 
-            checkpoint_path = max(checkpoints, key=lambda x: int(re.search(r'iteration_(\d+)', x).group(1)))
+            # More robust checkpoint file parsing
+            iterations = []
+            for checkpoint in checkpoints:
+                match = re.search(r'iteration_(\d+)', checkpoint)
+                if match:
+                    iterations.append((int(match.group(1)), checkpoint))
+            
+            if not iterations:
+                logger.info("No valid checkpoint files found, starting fresh training")
+                return False
+            
+            # Get the checkpoint with highest iteration number
+            _, checkpoint_path = max(iterations, key=lambda x: x[0])
         
         try:
             logger.info(f"Loading checkpoint from {checkpoint_path}")
