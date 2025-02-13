@@ -44,7 +44,7 @@ class AIPlayer:
         
         self.model.eval()
         # Initialize agent with MCTS search and pass the environment
-        self.agent = XiangqiAgent(self.model, self.env, num_simulations=100)
+        self.agent = XiangqiAgent(self.model, self.env, num_simulations=500)
 
     def get_action(self):
         """Get the AI's move based on the current state"""
@@ -53,7 +53,7 @@ class AIPlayer:
             return None
             
         # Use the agent to select an action with MCTS
-        return self.agent.select_action(valid_moves, temperature=0.5)  # Lower temperature for stronger play
+        return self.agent.select_action(valid_moves)  # Lower temperature for stronger play
 
 def find_model():
     """Find a valid model in the checkpoints directory if no model path is provided"""
@@ -65,8 +65,8 @@ def find_model():
     # Try different model file patterns
     patterns = [
         'final_model.pt',
-        'model_episode_*.pt',
-        'model_episode_*.pth',
+        'model_iteration_*.pt',
+        'model_iteration_*.pth',
         'best_model.pt',
         'best_model.pth',
         'final_model.pth'
@@ -138,9 +138,9 @@ def main():
                             if (selected_pos, board_pos) in valid_moves:
                                 # Animate and execute move
                                 visualizer.animate_move(selected_pos, board_pos)
-                                state, reward, done, info = env.step((selected_pos, board_pos))
+                                state = env.step((selected_pos, board_pos))
                                 
-                                if done:
+                                if env.is_game_over:
                                     game_over = True
                             
                             selected_pos = None
@@ -148,14 +148,13 @@ def main():
         
         # AI's turn
         if not env.current_player and not game_over:  # AI plays as black (False)
-            state = env._get_state()
             ai_move = ai_player.get_action()
             if ai_move:
                 # Animate and execute move
                 visualizer.animate_move(*ai_move)
-                state, reward, done, info = env.step(ai_move)
+                state = env.step(ai_move)
                 
-                if done:
+                if env.is_game_over:
                     game_over = True
         
         # Update display
@@ -163,8 +162,8 @@ def main():
         
         # Display game over message
         if game_over:
-            winner_text = "Red Wins!" if info['winner'] else "Black Wins!" if info['winner'] is not None else "Draw!"
-            text_color = visualizer.RED if info['winner'] else visualizer.BLACK if info['winner'] is not None else (128, 128, 128)
+            winner_text = "Red Wins!" if env.winner else "Black Wins!" if env.winner is not None else "Draw!"
+            text_color = visualizer.RED if env.winner else visualizer.BLACK if env.winner is not None else (128, 128, 128)
             
             font = pygame.font.Font(None, 74)
             text = font.render(winner_text, True, text_color)

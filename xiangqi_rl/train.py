@@ -395,6 +395,7 @@ class AlphaZeroTrainer:
             # Force draw after too many moves
             if move_count >= self.config.max_moves:  # Use config max_moves
                 logger.info("Game drawn due to move limit")
+                self.save_game(moves, env.winner)
                 return [(state, pi, 0) for state, pi, player in game_history]
         
         if pbar is not None:
