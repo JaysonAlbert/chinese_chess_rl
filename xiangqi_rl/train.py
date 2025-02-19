@@ -19,6 +19,7 @@ from xiangqi_rl.logger import logger
 import glob
 import re
 import psutil
+import queue
 
 # Set start method to spawn
 if __name__ == '__main__':
@@ -561,10 +562,10 @@ class AlphaZeroTrainer:
         logger.info(f"Evaluation complete - Win rate against best model: {win_rate:.2%}")
 
         # If new model is significantly better, save it as best model
-        if win_rate > 0.55:  # 55% win rate threshold
-            torch.save(self.model.state_dict(), self.best_model_path)
-            self.best_model.load_state_dict(self.model.state_dict())
-            logger.info("New best model saved!")
+        # if win_rate > 0.55:  # 55% win rate threshold
+        torch.save(self.model.state_dict(), self.best_model_path)
+        self.best_model.load_state_dict(self.model.state_dict())
+        logger.info("New best model saved!")
 
     def play_evaluation_game(self, red_player, black_player):
         """Play a single evaluation game between two models"""
@@ -703,37 +704,26 @@ def self_play_worker(game_queue, model_state_dict, config, device='cpu', disable
         logger.error(f"Worker initialization error: {e}")
 
 class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
-    def __init__(self, model, config, num_workers=4, gpu_workers=None, show_board=False, disable_progress_bar=True):
+    def __init__(self, model, config, num_workers=4,  show_board=False, disable_progress_bar=True):
         super().__init__(model, config, show_board, disable_progress_bar)
         self.num_workers = num_workers
         self.disable_progress_bar = disable_progress_bar
-        
-        # Adjust worker distribution to prevent resource competition
-        if gpu_workers is None and torch.cuda.is_available():
-            if torch.cuda.device_count() == 1:
-                # For single GPU, use fewer CPU workers to avoid resource competition
-                self.gpu_workers = 1
-                self.cpu_workers = num_workers - 1  # Limit CPU workers
-            else:
-                # For multi-GPU, balance based on GPU count
-                self.gpu_workers = min(torch.cuda.device_count(), num_workers // 2)
-                self.cpu_workers = num_workers - self.gpu_workers
-        else:
-            self.gpu_workers = gpu_workers if torch.cuda.is_available() else 0
-            self.cpu_workers = num_workers - self.gpu_workers
 
         # Set CUDA device for each GPU worker
-        self.gpu_devices = []
-        for i in range(self.gpu_workers):
-            self.gpu_devices.append(f'cuda:{i % torch.cuda.device_count()}')
+        self.devices = []
+        if torch.cuda.is_available():
+            for i in range(self.num_workers):
+                self.devices.append(f'cuda:{i % torch.cuda.device_count()}')
+        else:
+            self.devices = ['cpu'] * self.num_workers
             
         logger.info(f"GPU count: {torch.cuda.device_count()}")
-        logger.info(f"Initializing with {self.cpu_workers} CPU workers and {self.gpu_workers} GPU workers")
-        logger.info(f"GPU devices: {self.gpu_devices}")
+        logger.info(f"Initializing with {self.num_workers} workers")
+        logger.info(f"Devices: {self.devices}")
 
     def parallel_self_play(self):
         """Execute self-play games in parallel using both CPU and GPU"""
-        logger.info(f"Starting parallel self-play with {self.cpu_workers} CPU and {self.gpu_workers} GPU workers")
+        logger.info(f"Starting parallel self-play with {self.num_workers} workers")
         
         # Create a queue for collecting game results
         game_queue = mp.Queue()
@@ -746,29 +736,13 @@ class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
         logger.info("Starting worker processes...")
         
         try:
-            # Start CPU workers
-            for i in range(self.cpu_workers):
-                p = mp.Process(
-                    target=self_play_worker,
-                    args=(game_queue, cpu_state_dict, self.config, 'cpu', True)
-                )
-                p.start()
-                
-                # Set CPU affinity if possible
-                try:
-                    worker_process = psutil.Process(p.pid)
-                    worker_process.cpu_affinity([i % psutil.cpu_count()])
-                except Exception as e:
-                    logger.warning(f"Could not set CPU affinity: {e}")
-                
-                workers.append(p)
             
-            # Start GPU workers
-            for i in range(self.gpu_workers):
-                gpu_device = self.gpu_devices[i]
+            # Start GPU or CPU workers
+            for i in range(self.num_workers):
+                device = self.devices[i]
                 p = mp.Process(
                     target=self_play_worker,
-                    args=(game_queue, cpu_state_dict, self.config, gpu_device, False)
+                    args=(game_queue, cpu_state_dict, self.config, device, True if i != 0 else False)
                 )
                 p.start()
                 workers.append(p)
@@ -790,12 +764,13 @@ class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
         try:
             while games_collected < self.config.games_per_iteration:
                 try:
-                    game_history = game_queue.get(timeout=3600)  # 5 minute timeout
+                    # Add timeout to prevent infinite waiting
+                    game_history = game_queue.get(timeout=3600)  # 1 hour timeout
                     all_games.extend(game_history)
                     games_collected += 1
                     pbar.update(1)
                     
-                    # Add games to replay buffer immediately instead of accumulating
+                    # Add games to replay buffer immediately
                     self.replay_buffer.extend(game_history)
                     current_buffer_size = len(self.replay_buffer)
                     
@@ -811,7 +786,6 @@ class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
                     
                     # Start training if we have enough data
                     if current_buffer_size >= self.config.min_buffer_size:
-                        # Do some training steps
                         train_steps = self.config.steps_per_iteration // self.config.games_per_iteration
                         train_pbar = tqdm(range(train_steps), 
                                         desc="Training steps", 
@@ -826,9 +800,9 @@ class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
                                 'v_loss': f'{value_loss:.3f}'
                             })
 
-                    if games_collected >= self.config.games_per_iteration:
-                        break
-                        
+                except queue.Empty:
+                    logger.error("Timeout while waiting for games. Terminating workers and restarting collection.")
+                    break
                 except Exception as e:
                     logger.error(f"Error collecting game results: {e}", exc_info=True)
                     break
@@ -840,8 +814,23 @@ class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
             logger.info("Terminating worker processes...")
             for w in workers:
                 w.terminate()
-                w.join()
+                w.join(timeout=5)  # Add timeout to prevent hanging
+            
+            # Force kill if process hasn't terminated
+            if w.is_alive():
+                logger.warning(f"Force killing worker process {w.pid}")
+                try:
+                    os.kill(w.pid, 9)  # SIGKILL
+                except:
+                    pass
         
+            # Clear the queue
+            while not game_queue.empty():
+                try:
+                    game_queue.get_nowait()
+                except:
+                    pass
+                
             # Log cleanup
             logger.info("Cleaning up parallel self-play resources")
         
@@ -930,8 +919,6 @@ if __name__ == "__main__":
                        help='Resume training from latest checkpoint')
     parser.add_argument('--checkpoint', type=str,
                        help='Resume training from specific checkpoint file')
-    parser.add_argument('--gpu-workers', type=int, default=None,
-                       help='Number of GPU workers (default: 25% of total workers)')
     args = parser.parse_args()
 
     if args.test_mcts:
@@ -955,7 +942,6 @@ if __name__ == "__main__":
                 model, 
                 config, 
                 num_workers=args.num_workers,
-                gpu_workers=args.gpu_workers,
                 show_board=args.show_board
             )
         else:
