@@ -76,27 +76,24 @@ class DistributedAlphaZero:
             )
         )
         
-        # Add try-except for Redis connection
-        try:
-            self.redis_client = redis.Redis(
-                host=redis_host,
-                port=redis_port,
-                decode_responses=False
-            )
-            # Test connection
-            self.redis_client.ping()
-        except redis.ConnectionError as e:
-            logger.error(f"Failed to connect to Redis: {e}")
-            raise
+        self.redis_client = get_redis_client(redis_host, redis_port)
         
         # Initialize model
         self.model = XiangqiHybridNet().to(self.device)
         
-        # Load checkpoint if resuming
-        if self.is_master and self.config.resume_from and os.path.exists(self.config.resume_from):
-            logger.info(f"Loading checkpoint from {self.config.resume_from}")
-            checkpoint = torch.load(self.config.resume_from, map_location=self.device)
-            self.model.load_state_dict(checkpoint['model_state_dict'])
+        if self.is_master:
+            self.start_iteration = 0  # Only master needs to track iteration
+            # Master node maintains the official model and trainer
+            self.trainer = AlphaZeroTrainer(
+                self.model,
+                config,
+                show_board=False,
+                disable_progress_bar=False
+            )
+            
+            # Only master loads checkpoint
+            if self.config.resume_from:
+                self._load_checkpoint()
         
         # Wrap model with DDP
         if torch.cuda.is_available():
@@ -104,22 +101,11 @@ class DistributedAlphaZero:
         else:
             self.model = DDP(self.model)
 
-        self.agent = XiangqiAgent(self.model.module, XiangqiEnv(), num_simulations=100, show_board=False, disable_progress_bar=False)
+        self.agent = XiangqiAgent(self.model.module, XiangqiEnv(), 
+                                 num_simulations=100, 
+                                 show_board=False, 
+                                 disable_progress_bar=False)
         
-        if self.is_master:
-            # Master node maintains the official model
-            self.trainer = AlphaZeroTrainer(
-                self.model.module,
-                config,
-                show_board=False,
-                disable_progress_bar=False
-            )
-            
-            # Load optimizer state if resuming
-            if self.config.resume_from and os.path.exists(self.config.resume_from):
-                self.trainer.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-                logger.info(f"Resumed from iteration {checkpoint['iteration']}")
-            
         # Create local replay buffer
         self.local_buffer = deque(maxlen=self.config.max_buffer_size)
         
@@ -160,7 +146,8 @@ class DistributedAlphaZero:
         logger.info("Starting master node")
         
         try:
-            for iteration in range(self.config.num_iterations):
+            # Start from the loaded iteration number
+            for iteration in range(self.start_iteration, self.config.num_iterations):
                 if not self.running:
                     logger.info("Stopping master node gracefully...")
                     break
@@ -262,22 +249,54 @@ class DistributedAlphaZero:
 
     def _run_selfplay(self):
         """Run self-play games and add to local buffer"""
-        num_games = self.config.games_per_iteration // self.world_size
+        total_games_needed = self.config.games_per_iteration
+        games_completed_key = "games_completed"
         
-        for _ in tqdm(range(num_games), desc=f"Self-play games (Node {self.rank})"):
+        if self.is_master:
+            # Master initializes the counter
+            self.redis_client.set(games_completed_key, "0")
+        
+        while True:
+            # Atomically increment games counter
+            current_games = self.redis_client.incr(games_completed_key)
+            
+            if current_games > total_games_needed:
+                logger.info(f"Node {self.rank}: Required number of games completed")
+                break
+            
+            # Run one game
+            logger.debug(f"Node {self.rank}: Starting game {current_games}/{total_games_needed}")
             game_history = self.agent.self_play()
             self.local_buffer.extend(game_history)
+            
+            # Log progress periodically
+            if current_games % 10 == 0:
+                logger.info(f"Total games completed: {current_games}/{total_games_needed}")
+            
+        games_played = len(self.local_buffer)
+        logger.info(f"Node {self.rank} completed {games_played} games")
 
     def _broadcast_model(self):
         """Broadcast model parameters from master to workers"""
-        for param in self.model.parameters():
-            dist.broadcast(param.data, src=0)
-
-    def _receive_model(self):
-        """Receive broadcasted model parameters on workers"""
+        if self.is_master:
+            logger.info("Master broadcasting model parameters...")
+        else:
+            logger.info(f"Worker {self.rank} waiting for model parameters...")
+        
         for param in self.model.parameters():
             dist.broadcast(param.data, src=0)
         
+        if self.is_master:
+            logger.info("Model broadcast complete")
+        else:
+            logger.info(f"Worker {self.rank} received model parameters")
+
+    def _receive_model(self):
+        """Workers receive initial model parameters from master"""
+        logger.info(f"Worker {self.rank} waiting for initial model parameters...")
+        self._broadcast_model()  # Reuse broadcast logic
+        logger.info(f"Worker {self.rank} received initial model parameters")
+
         # Update agent's model with the received parameters
         self.agent.model.load_state_dict(self.model.module.state_dict())
 
@@ -289,6 +308,8 @@ class DistributedAlphaZero:
                 buffer_key = f"buffer:{self.rank}"
                 buffer_data = pickle.dumps(list(self.local_buffer))
                 self.redis_client.set(buffer_key, buffer_data)
+                # Clear local buffer after successful upload
+                self.local_buffer.clear()
                 return
             except (redis.RedisError, pickle.PickleError) as e:
                 if attempt == max_retries - 1:
@@ -297,17 +318,24 @@ class DistributedAlphaZero:
                 time.sleep(1)
 
     def _aggregate_replay_buffers(self):
-        """Aggregate replay buffers from all workers"""
+        """Aggregate replay buffers from all workers and master"""
         all_data = []
         
+        # Add master's local buffer first
+        all_data.extend(list(self.local_buffer))
+        logger.info(f"Added master's buffer with {len(self.local_buffer)} examples")
+        # Clear master's local buffer after using it
+        self.local_buffer.clear()
+        
         # Collect data from all workers
-        for worker_rank in range(self.world_size):
+        for worker_rank in range(1, self.world_size):  # Start from 1 to skip master
             buffer_key = f"buffer:{worker_rank}"
             buffer_data = self.redis_client.get(buffer_key)
             if buffer_data:
                 try:
                     worker_buffer = pickle.loads(buffer_data)
                     all_data.extend(worker_buffer)
+                    logger.info(f"Added worker {worker_rank}'s buffer with {len(worker_buffer)} examples")
                 except (pickle.PickleError, EOFError) as e:
                     logger.error(f"Error unpickling buffer from worker {worker_rank}: {e}")
                     continue
@@ -318,7 +346,7 @@ class DistributedAlphaZero:
         
         # Update master's replay buffer
         self.trainer.replay_buffer = deque(all_data, maxlen=self.config.max_buffer_size)
-        logger.info(f"Aggregated buffer size: {len(self.trainer.replay_buffer)}")
+        logger.info(f"Aggregated buffer size: {len(self.trainer.replay_buffer)} from {len(all_data)} total examples")
 
     def _train_iteration(self):
         """Train on aggregated data"""
@@ -359,9 +387,48 @@ class DistributedAlphaZero:
         raise TimeoutError("Workers did not complete in time")
 
     def _clear_completion_flags(self):
-        """Clear completion flags for all workers"""
+        """Clear completion flags and game counter for all workers"""
         for worker_rank in range(1, self.world_size):
             self.redis_client.delete(f"complete:{worker_rank}")
+        # Also clear the games counter
+        self.redis_client.delete("games_completed")
+
+    def _load_checkpoint(self):
+        """Load checkpoint and restore all saved states"""
+        if not self.config.resume_from or not os.path.exists(self.config.resume_from):
+            return
+
+        logger.info(f"Loading checkpoint from {self.config.resume_from}")
+        try:
+            checkpoint = torch.load(self.config.resume_from, map_location=self.device)
+            
+            # Load model state
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+            
+            # Set starting iteration
+            self.start_iteration = checkpoint['iteration'] + 1
+            logger.info(f"Resuming from iteration {self.start_iteration}")
+            
+            # For master node, restore additional training state
+            if self.is_master:
+                # Load optimizer state
+                self.trainer.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                
+                # Restore replay buffer if it exists
+                if 'replay_buffer' in checkpoint:
+                    self.trainer.replay_buffer = deque(checkpoint['replay_buffer'], 
+                                                    maxlen=self.config.max_buffer_size)
+                    logger.info(f"Restored replay buffer with {len(self.trainer.replay_buffer)} examples")
+                
+                # Restore global step counter
+                if 'global_step' in checkpoint:
+                    self.trainer.global_step = checkpoint['global_step']
+                    
+                logger.info(f"Successfully restored full training state from checkpoint")
+                
+        except Exception as e:
+            logger.error(f"Error loading checkpoint: {e}")
+            raise
 
 def find_latest_checkpoint():
     """Find the latest checkpoint file in the checkpoints directory"""
@@ -380,18 +447,64 @@ def find_latest_checkpoint():
     latest_checkpoint = max(checkpoint_files, key=get_iteration_num)
     return latest_checkpoint
 
+def get_redis_client(redis_host, redis_port):
+    """Create and test Redis connection"""
+    try:
+        redis_client = redis.Redis(
+            host=redis_host,
+            port=redis_port,
+            decode_responses=False
+        )
+        redis_client.ping()
+        return redis_client
+    except redis.ConnectionError as e:
+        logger.error(f"Failed to connect to Redis: {e}")
+        raise
+
+def get_rank_from_redis(redis_client, world_size, clear_rank=False):
+    """Get available rank from Redis using atomic operations"""
+    rank_key = "xiangqi_training:rank_counter"
+    
+    # Clear rank counter if requested
+    if clear_rank:
+        redis_client.delete(rank_key)
+        logger.info("Cleared rank counter in Redis")
+    
+    try:
+        # Atomically increment and get rank
+        rank = redis_client.incr(rank_key)
+        rank = rank - 1  # Convert to 0-based index
+        
+        if rank >= world_size:
+            # Reset counter if we exceeded world_size
+            redis_client.set(rank_key, "0")
+            raise RuntimeError(f"No ranks available. Got rank {rank} but world_size is {world_size}")
+            
+        return rank
+    except redis.RedisError as e:
+        logger.error(f"Failed to get rank from Redis: {e}")
+        raise
+
 def launch_distributed_training(
-    rank,
     world_size,
     master_addr,
     master_port,
     redis_host,
     redis_port,
-    config
+    config,
+    clear_rank=False
 ):
     """Launch function for distributed training"""
+    # Create Redis client that will be reused
+    redis_client = get_redis_client(redis_host, redis_port)
+    
+    # Get rank from Redis
+    rank = get_rank_from_redis(redis_client, world_size, clear_rank)
+    logger.info(f"Obtained rank {rank} from Redis")
+
+    is_master=(rank == 0)
     # Find latest checkpoint if config.resume_from is not specified
-    if config.resume_from is None:
+    if is_master and config.resume_from is None:
         latest_checkpoint = find_latest_checkpoint()
         if latest_checkpoint:
             logger.info(f"Found latest checkpoint: {latest_checkpoint}")
@@ -407,7 +520,7 @@ def launch_distributed_training(
         redis_host=redis_host,
         redis_port=redis_port,
         config=config,
-        is_master=(rank == 0)
+        is_master=is_master
     )
     trainer.run()
 
@@ -415,13 +528,14 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser()
-    parser.add_argument('--rank', type=int, required=True)
     parser.add_argument('--world-size', type=int, required=True)
     parser.add_argument('--master-addr', type=str, required=True)
     parser.add_argument('--master-port', type=int, required=True)
     parser.add_argument('--redis-host', type=str, required=True)
     parser.add_argument('--redis-port', type=int, required=True)
     parser.add_argument('--config', type=str, required=True)
+    parser.add_argument('--clear-rank', action='store_true',
+                       help='Clear rank counter in Redis before starting')
     
     args = parser.parse_args()
     
@@ -431,11 +545,11 @@ if __name__ == "__main__":
     config = TrainingConfig(**config_dict)
     
     launch_distributed_training(
-        rank=args.rank,
         world_size=args.world_size,
         master_addr=args.master_addr,
         master_port=args.master_port,
         redis_host=args.redis_host,
         redis_port=args.redis_port,
         config=config,
+        clear_rank=args.clear_rank
     ) 
