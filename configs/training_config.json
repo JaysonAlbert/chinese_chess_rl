@@ -1,0 +1,18 @@
+{
+    "num_iterations": 2000,
+    "games_per_iteration": 50,
+    "num_simulations": 200,
+    "batch_size": 128,
+    "steps_per_iteration": 500,
+    "max_buffer_size": 100000,
+    "min_buffer_size": 10000,
+    "learning_rate": 0.001,
+    "weight_decay": 0.0001,
+    "dirichlet_alpha": 0.3,
+    "exploration_constant": 1.0,
+    "temperature": 1.0,
+    "temperature_drop": 10,
+    "eval_games": 10,
+    "eval_interval": 5,
+    "checkpoint_interval": 5
+}

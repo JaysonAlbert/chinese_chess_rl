@@ -12,9 +12,6 @@ import random
 import torch.multiprocessing as mp
 from collections import deque
 import math
-import pygame
-from xiangqi_rl.visualize import XiangqiVisualizer
-import gc
 from xiangqi_rl.logger import logger
 import glob
 import re
@@ -27,24 +24,68 @@ if __name__ == '__main__':
 
 
 class TrainingConfig:
-    """Training configuration and hyperparameters"""
-    def __init__(self, 
-                 num_iterations=1000,
-                 games_per_iteration=100,    # Games to play per iteration
-                 min_buffer_size=5000,      # Min games before training starts
-                 batch_size=256,
-                 steps_per_iteration=1000,   # Training steps per iteration
-                 eval_interval=10, 
-                 max_buffer_size=500000,
-                 max_moves=200):            # Maximum moves per game
+    def __init__(
+        self,
+        num_iterations=1000,
+        games_per_iteration=100,
+        num_simulations=200,
+        batch_size=128,
+        steps_per_iteration=500,
+        max_buffer_size=100000,
+        min_buffer_size=10000,
+        learning_rate=0.001,
+        weight_decay=0.0001,
+        dirichlet_alpha=0.3,
+        exploration_constant=1.0,
+        temperature=1.0,
+        temperature_drop=10,
+        eval_games=10,
+        eval_interval=5,
+        checkpoint_interval=5,
+        max_moves=200,
+        resume_from=None
+    ):
+        """
+        Configuration for AlphaZero training
+        
+        Args:
+            num_iterations: Total number of training iterations
+            games_per_iteration: Number of self-play games per iteration
+            num_simulations: Number of MCTS simulations per move
+            batch_size: Training batch size
+            steps_per_iteration: Number of training steps per iteration
+            max_buffer_size: Maximum size of replay buffer
+            min_buffer_size: Minimum samples needed before training starts
+            learning_rate: Learning rate for optimizer
+            weight_decay: L2 regularization parameter
+            dirichlet_alpha: Dirichlet noise parameter for root node
+            exploration_constant: PUCT constant for MCTS
+            temperature: Initial temperature for action selection
+            temperature_drop: Move number when temperature drops to 0
+            eval_games: Number of evaluation games to play
+            eval_interval: How often to run evaluation (in iterations)
+            checkpoint_interval: How often to save model checkpoints
+            resume_from: Path to checkpoint to resume from
+        """
         self.num_iterations = num_iterations
         self.games_per_iteration = games_per_iteration
-        self.min_buffer_size = min_buffer_size
+        self.num_simulations = num_simulations
         self.batch_size = batch_size
         self.steps_per_iteration = steps_per_iteration
-        self.eval_interval = eval_interval
         self.max_buffer_size = max_buffer_size
+        self.min_buffer_size = min_buffer_size
+        self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
+        self.dirichlet_alpha = dirichlet_alpha
+        self.exploration_constant = exploration_constant
+        self.temperature = temperature
+        self.temperature_drop = temperature_drop
+        self.eval_games = eval_games
+        self.eval_interval = eval_interval
+        self.checkpoint_interval = checkpoint_interval
+        self.resume_from = resume_from
         self.max_moves = max_moves
+        self.iteration_timeout = 3600  # 1 hour timeout for iterations
 
 class MCTS:
     """Monte Carlo Tree Search implementation"""
@@ -302,120 +343,6 @@ class AlphaZeroTrainer:
             f.write(f'{self.game_id},"{moves_str}",{len(moves)},"AlphaZero自我对弈",'
                    f'{current_date},"AI_Red","AI_Black",{result_str}\n')
     
-    def self_play(self):
-        """Execute one episode of self-play"""
-        logger.info("Starting new self-play game")
-        env = XiangqiEnv()
-        game_history = []
-        move_count = 0
-        moves = []  # Store moves for saving
-        
-        # Only show progress bar if not disabled
-        pbar = None if self.disable_progress_bar else tqdm(desc="Self-play game", leave=False)
-        vis = None
-        if self.show_board:
-            vis = XiangqiVisualizer(env)
-            vis.draw_board()
-        
-        while not env.is_game_over:
-            # Periodically force garbage collection
-            if move_count % 10 == 0:
-                gc.collect()
-            
-            # Clear MCTS tree every 10 moves to prevent memory buildup
-            if move_count % 10 == 0:
-                self.mcts.clear_tree()
-            
-            if vis:
-                # Handle Pygame events more frequently
-                for _ in range(10):  # Check events multiple times
-                    for event in pygame.event.get():
-                        if event.type == pygame.QUIT:
-                            vis.close()
-                            return game_history
-                        elif event.type == pygame.KEYDOWN:
-                            if event.key == pygame.K_ESCAPE:
-                                vis.close()
-                                return game_history
-                    pygame.time.wait(10)  # Small delay to keep UI responsive
-            
-            move_count += 1
-            if pbar is not None:
-                pbar.update(1)
-                pbar.set_description(f"Move {move_count}")
-            
-            # Get MCTS probabilities
-            pi = self.mcts.search(env)
-            
-            # Store canonical state and MCTS probabilities
-            state = env.get_canonical_state()
-            state = np.array(state).reshape(14, 10, 9)  # Reshape for consistency
-            game_history.append([
-                state,
-                pi,
-                env.current_player
-            ])
-            
-            # Select move (with temperature)
-            valid_moves = env.get_valid_moves()
-            valid_move_probs = []
-            valid_move_indices = []
-            
-            for move in valid_moves:
-                move_idx = self.mcts._move_to_index(move)
-                valid_move_probs.append(pi[move_idx])
-                valid_move_indices.append(move_idx)
-            
-            # Apply temperature
-            if len(game_history) < 30:  # First 30 moves
-                temperature = 1.2  # Higher temperature for more exploration
-            else:
-                temperature = 0.5  # Lower temperature for better moves
-            
-            probs = [p ** (1/temperature) for p in valid_move_probs]
-            
-            total = sum(probs)
-            if total > 0:
-                probs = [p/total for p in probs]
-                
-                # Select move
-                move_idx = np.random.choice(len(valid_moves), p=probs)
-                action = valid_moves[move_idx]
-                moves.append(action)  # Record the move
-                
-                if vis:
-                    vis.animate_move(action[0], action[1])
-                
-                # Log the selected move
-                logger.debug(f"Selected move {action} with probability {probs[move_idx]:.3f}")
-                
-                env.step(action)
-                if vis:
-                    vis.draw_board()
-            
-            # Force draw after too many moves
-            if move_count >= self.config.max_moves:  # Use config max_moves
-                logger.info("Game drawn due to move limit")
-                self.save_game(moves, env.winner)
-                return [(state, pi, 0) for state, pi, player in game_history]
-        
-        if pbar is not None:
-            pbar.close()
-        if vis:
-            vis.close()
-        
-        # Save game to CSV
-        value = env.get_reward()
-        self.save_game(moves, env.winner)
-        
-        # Log game completion
-        logger.info(f"Game completed after {move_count} moves. Result: {env.get_reward()}")
-        
-        # Convert game history to training data
-        # Each state gets the final game outcome as its value target
-        # value is +1 for win, -1 for loss from the perspective of the player who made the move
-        return [(state, pi, value * (1 if player == env.current_player else -1)) 
-                for state, pi, player in game_history]
     
     def train(self):
         """Main training loop more similar to AlphaGo Zero"""
@@ -816,13 +743,13 @@ class ParallelAlphaZeroTrainer(AlphaZeroTrainer):
                 w.terminate()
                 w.join(timeout=5)  # Add timeout to prevent hanging
             
-            # Force kill if process hasn't terminated
-            if w.is_alive():
-                logger.warning(f"Force killing worker process {w.pid}")
-                try:
-                    os.kill(w.pid, 9)  # SIGKILL
-                except:
-                    pass
+                # Force kill if process hasn't terminated
+                if w.is_alive():
+                    logger.warning(f"Force killing worker process {w.pid}")
+                    try:
+                        os.kill(w.pid, 9)  # SIGKILL
+                    except:
+                        pass
         
             # Clear the queue
             while not game_queue.empty():
