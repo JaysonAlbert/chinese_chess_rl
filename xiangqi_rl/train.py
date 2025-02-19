@@ -313,36 +313,6 @@ class AlphaZeroTrainer:
         self.checkpoint_dir = "logs/checkpoints"
         os.makedirs(self.checkpoint_dir, exist_ok=True)
 
-    def _move_to_string(self, move):
-        """Convert move tuple to string format like '9,6,7,4'"""
-        (from_row, from_col), (to_row, to_col) = move
-        return f"{from_row},{from_col},{to_row},{to_col}"
-        
-    def save_game(self, moves, winner):
-        """Save game to CSV file"""
-        self.game_id += 1
-        moves_str = " ".join(self._move_to_string(move) for move in moves)
-        
-        # Get result string based on winner
-        if winner is None:  # Draw
-            result_str = "和棋"
-        else:  # Win/Loss
-            result_str = "红方胜" if winner else "黑方胜"
-            
-        # Get current date
-        from datetime import datetime
-        current_date = datetime.now().strftime("%Y.%m.%d")
-        
-        # Create or append to CSV file
-        csv_path = os.path.join(self.games_dir, "selfplay_games.csv")
-        if not os.path.exists(csv_path):
-            with open(csv_path, 'w', encoding='utf-8') as f:
-                f.write("game_id,moves,num_moves,event,date,red_player,black_player,result\n")
-                
-        with open(csv_path, 'a', encoding='utf-8') as f:
-            f.write(f'{self.game_id},"{moves_str}",{len(moves)},"AlphaZero自我对弈",'
-                   f'{current_date},"AI_Red","AI_Black",{result_str}\n')
-    
     
     def train(self):
         """Main training loop more similar to AlphaGo Zero"""

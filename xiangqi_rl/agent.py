@@ -8,6 +8,7 @@ from xiangqi_rl.visualize import XiangqiVisualizer
 import gc
 from xiangqi_rl.logger import logger
 from tqdm import tqdm
+import os
 
 class XiangqiAgent:
     def __init__(self, model, env, num_simulations=100, max_moves=200, show_board=False, disable_progress_bar=False):
@@ -17,6 +18,10 @@ class XiangqiAgent:
         self.show_board = show_board
         self.disable_progress_bar = disable_progress_bar
         self.max_moves = max_moves
+        self.game_id = 0
+        # Create games directory if it doesn't exist
+        self.games_dir = "logs/games"
+        os.makedirs(self.games_dir, exist_ok=True)
         
     def select_action(self, valid_moves, temperature=1.0):
         """Select an action using MCTS search"""
@@ -169,3 +174,34 @@ class XiangqiAgent:
         # value is +1 for win, -1 for loss from the perspective of the player who made the move
         return [(state, pi, value * (1 if player == env.current_player else -1)) 
                 for state, pi, player in game_history]
+        
+    def save_game(self, moves, winner):
+        """Save game to CSV file"""
+        self.game_id += 1
+        moves_str = " ".join(self._move_to_string(move) for move in moves)
+        
+        # Get result string based on winner
+        if winner is None:  # Draw
+            result_str = "和棋"
+        else:  # Win/Loss
+            result_str = "红方胜" if winner else "黑方胜"
+            
+        # Get current date
+        from datetime import datetime
+        current_date = datetime.now().strftime("%Y.%m.%d")
+        
+        # Create or append to CSV file
+        csv_path = os.path.join(self.games_dir, "selfplay_games.csv")
+        if not os.path.exists(csv_path):
+            with open(csv_path, 'w', encoding='utf-8') as f:
+                f.write("game_id,moves,num_moves,event,date,red_player,black_player,result\n")
+                
+        with open(csv_path, 'a', encoding='utf-8') as f:
+            f.write(f'{self.game_id},"{moves_str}",{len(moves)},"AlphaZero自我对弈",'
+                   f'{current_date},"AI_Red","AI_Black",{result_str}\n')
+            
+    def _move_to_string(self, move):
+        """Convert move tuple to string format like '9,6,7,4'"""
+        (from_row, from_col), (to_row, to_col) = move
+        return f"{from_row},{from_col},{to_row},{to_col}"
+    
