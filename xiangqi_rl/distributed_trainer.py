@@ -18,6 +18,7 @@ import signal
 from xiangqi_rl.agent import XiangqiAgent
 from xiangqi_rl.environment import XiangqiEnv
 from xiangqi_rl.logger import logger
+from xiangqi_rl.mcts import MCTS
 
 class DistributedAlphaZero:
     def __init__(
@@ -187,11 +188,11 @@ class DistributedAlphaZero:
                     self.trainer.save_checkpoint(iteration)
                     logger.info("Checkpoint saved")
                 
-                # Evaluate and save checkpoints
+                # Replace trainer.evaluate() with distributed evaluation
                 if iteration % self.config.eval_interval == 0:
-                    logger.info("Starting evaluation...")
-                    self.trainer.evaluate()
-                    logger.info("Evaluation complete")
+                    logger.info("Starting distributed evaluation...")
+                    self._run_distributed_evaluation()
+                    logger.info("Distributed evaluation complete")
                 
                 # Clear Redis buffer periodically
                 if iteration % 5 == 0:
@@ -213,6 +214,11 @@ class DistributedAlphaZero:
         
         try:
             while self.running:
+                # Check if we're in evaluation mode
+                if self.redis_client.get("evaluation_mode"):
+                    self._run_evaluation_worker()
+                    continue
+                    
                 start_time = time.time()
                 # Receive latest model from master
                 logger.info(f"Worker {self.rank}: Waiting for model update...")
@@ -222,7 +228,7 @@ class DistributedAlphaZero:
                 # Run self-play games
                 logger.info(f"Worker {self.rank}: Starting self-play games...")
                 self._run_selfplay()
-                logger.info(f"Worker {self.rank}: Completed self-play with {len(self.local_buffer)} games")
+                logger.info(f"Worker {self.rank}: Completed self-play with {len(self.local_buffer)} states from self-play")
                 
                 # Upload replay buffer to Redis
                 logger.info(f"Worker {self.rank}: Uploading replay buffer to Redis...")
@@ -251,6 +257,7 @@ class DistributedAlphaZero:
         """Run self-play games and add to local buffer"""
         total_games_needed = self.config.games_per_iteration
         games_completed_key = "games_completed"
+        games_played = 0  # Track actual number of games played
         
         if self.is_master:
             # Master initializes the counter
@@ -268,12 +275,12 @@ class DistributedAlphaZero:
             logger.debug(f"Node {self.rank}: Starting game {current_games}/{total_games_needed}")
             game_history = self.agent.self_play()
             self.local_buffer.extend(game_history)
+            games_played += 1  # Increment games played counter
             
             # Log progress periodically
             if current_games % 10 == 0:
                 logger.info(f"Total games completed: {current_games}/{total_games_needed}")
-            
-        games_played = len(self.local_buffer)
+        
         logger.info(f"Node {self.rank} completed {games_played} games")
 
     def _broadcast_model(self):
@@ -367,7 +374,7 @@ class DistributedAlphaZero:
 
     def _wait_for_workers(self):
         """Wait for all workers to complete current iteration"""
-        max_retries = 100
+        max_retries = 120
         retry_count = 0
         while retry_count < max_retries:
             all_complete = True
@@ -380,7 +387,7 @@ class DistributedAlphaZero:
                 for worker_rank in range(1, self.world_size):
                     self.redis_client.delete(f"complete:{worker_rank}")
                 return
-            time.sleep(1)
+            time.sleep(3)
             retry_count += 1
         
         logger.error("Timeout waiting for workers to complete")
@@ -429,6 +436,112 @@ class DistributedAlphaZero:
         except Exception as e:
             logger.error(f"Error loading checkpoint: {e}")
             raise
+
+    def _run_distributed_evaluation(self):
+        """Run evaluation games distributed across workers"""
+        if not self.is_master:
+            return
+        
+        logger.info("Starting distributed evaluation")
+        
+        # Signal workers to start evaluation mode
+        self.redis_client.set("evaluation_mode", "1")
+        
+        # Calculate games per worker
+        total_eval_games = self.config.eval_games * 2  # Each matchup played twice with colors reversed
+        games_per_worker = total_eval_games // (self.world_size - 1)  # Exclude master
+        remaining_games = total_eval_games % (self.world_size - 1)
+        
+        wins = 0
+        draws = 0
+        total_games = 0
+        
+        try:
+            # Wait for workers to complete evaluation games
+            for worker_rank in range(1, self.world_size):
+                eval_key = f"eval_results:{worker_rank}"
+                # Wait with timeout
+                for _ in range(60):  # 60 second timeout
+                    result = self.redis_client.get(eval_key)
+                    if result:
+                        worker_results = json.loads(result)
+                        wins += worker_results['wins']
+                        draws += worker_results['draws']
+                        total_games += worker_results['total']
+                        break
+                    time.sleep(1)
+                
+            if total_games > 0:
+                win_rate = (wins + draws) / total_games
+                logger.info(f"Evaluation complete - Win rate against best model: {win_rate:.2%}")
+                
+                # Save new best model if significantly better
+                if win_rate > 0.55:  # 55% win rate threshold
+                    logger.info("New model performs better - saving as best model")
+                    torch.save(self.model.module.state_dict(), self.trainer.best_model_path)
+                    if self.trainer.best_model:
+                        self.trainer.best_model.load_state_dict(self.model.module.state_dict())
+                    
+        finally:
+            # Clear evaluation mode
+            self.redis_client.delete("evaluation_mode")
+            # Clear results
+            for worker_rank in range(1, self.world_size):
+                self.redis_client.delete(f"eval_results:{worker_rank}")
+
+    def _run_evaluation_worker(self):
+        """Run evaluation games on worker node"""
+        logger.info(f"Worker {self.rank} starting evaluation")
+        
+        # Create evaluation MCTS with appropriate device
+        eval_mcts = MCTS(self.model.module, num_simulations=400,
+                         max_moves=self.config.max_moves,
+                         disable_progress_bar=True)
+                         
+        # Load best model for comparison
+        best_model = XiangqiHybridNet().to(self.device)
+        best_model_state = torch.load(self.trainer.best_model_path, 
+                                     map_location=self.device)
+        best_model.load_state_dict(best_model_state)
+        
+        best_mcts = MCTS(best_model, num_simulations=400,
+                         max_moves=self.config.max_moves, 
+                         disable_progress_bar=True)
+        
+        wins = 0
+        draws = 0
+        total_games = 0
+        
+        # Calculate number of games for this worker
+        games_per_worker = (self.config.eval_games * 2) // (self.world_size - 1)
+        if self.rank == self.world_size - 1:  # Last worker gets remaining games
+            games_per_worker += (self.config.eval_games * 2) % (self.world_size - 1)
+        
+        for _ in range(games_per_worker):
+            # Play one game as red
+            result = self.play_evaluation_game(eval_mcts, best_mcts)
+            if result == 1:
+                wins += 1
+            elif result == 0:
+                draws += 0.5
+            total_games += 1
+            
+            # Play one game as black
+            result = self.play_evaluation_game(best_mcts, eval_mcts)
+            if result == -1:  # Win for current model as black
+                wins += 1
+            elif result == 0:
+                draws += 0.5
+            total_games += 1
+        
+        # Save results to Redis
+        results = {
+            'wins': wins,
+            'draws': draws,
+            'total': total_games
+        }
+        self.redis_client.set(f"eval_results:{self.rank}", json.dumps(results))
+        logger.info(f"Worker {self.rank} completed evaluation: {results}")
 
 def find_latest_checkpoint():
     """Find the latest checkpoint file in the checkpoints directory"""

@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from xiangqi_rl.train import MCTS
+from xiangqi_rl.mcts import MCTS
 from xiangqi_rl.environment import XiangqiEnv
 from xiangqi_rl.visualize import XiangqiVisualizer
 import pygame
