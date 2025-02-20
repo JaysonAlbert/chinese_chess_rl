@@ -4,7 +4,6 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import rpc
 import redis
 import pickle
-import logging
 import random
 from collections import deque
 from xiangqi_rl.train import AlphaZeroTrainer, TrainingConfig
@@ -103,14 +102,15 @@ class DistributedAlphaZero:
             self.model = DDP(self.model)
 
         self.agent = XiangqiAgent(self.model.module, XiangqiEnv(), 
-                                 num_simulations=100, 
-                                 show_board=False, 
+                                 num_simulations=self.config.num_simulations, 
+                                 show_board=False,
+                                 max_moves=self.config.max_moves,
                                  disable_progress_bar=False)
         
         # Create local replay buffer
         self.local_buffer = deque(maxlen=self.config.max_buffer_size)
         
-        logger.info(f"Initialized node {self.rank}/{self.world_size}")
+        logger.info(f"Initialized node {self.rank + 1}/{self.world_size}")
 
         self.running = True
         # Setup signal handler
@@ -132,7 +132,7 @@ class DistributedAlphaZero:
         except KeyboardInterrupt:
             logger.info("Received keyboard interrupt")
         except Exception as e:
-            logger.error(f"Error in training loop: {e}")
+            logger.error(f"Error in training loop: {e}", exc_info=True)
         finally:
             # Cleanup
             logger.info("Cleaning up distributed resources...")
@@ -140,7 +140,7 @@ class DistributedAlphaZero:
                 dist.destroy_process_group()
                 rpc.shutdown()
             except Exception as e:
-                logger.error(f"Error during cleanup: {e}")
+                logger.error(f"Error during cleanup: {e}", exc_info=True)
 
     def _run_master(self):
         """Master node training loop"""
@@ -201,7 +201,7 @@ class DistributedAlphaZero:
                     logger.info("Redis buffer cleared")
 
         except Exception as e:
-            logger.error(f"Master node error: {e}")
+            logger.error(f"Master node error: {e}", exc_info=True)
         finally:
             # Save final checkpoint
             if self.is_master:
@@ -214,16 +214,20 @@ class DistributedAlphaZero:
         
         try:
             while self.running:
-                # Check if we're in evaluation mode
-                if self.redis_client.get("evaluation_mode"):
-                    self._run_evaluation_worker()
-                    continue
                     
                 start_time = time.time()
                 # Receive latest model from master
                 logger.info(f"Worker {self.rank}: Waiting for model update...")
                 self._receive_model()
                 logger.info(f"Worker {self.rank}: Received updated model")
+
+                 # Check if we're in evaluation mode
+                eval_config_data = self.redis_client.get("evaluation_config")
+                if eval_config_data:
+                    eval_config = json.loads(eval_config_data)
+                    if eval_config and eval_config['mode'] == 'evaluation':
+                        self._run_evaluation_worker()
+                        continue
                 
                 # Run self-play games
                 logger.info(f"Worker {self.rank}: Starting self-play games...")
@@ -249,7 +253,7 @@ class DistributedAlphaZero:
                 time.sleep(0.1)
 
         except Exception as e:
-            logger.error(f"Worker node {self.rank} error: {e}")
+            logger.error(f"Worker node {self.rank} error: {e}", exc_info=True)
         finally:
             logger.info(f"Worker node {self.rank} shutting down...")
 
@@ -320,16 +324,16 @@ class DistributedAlphaZero:
                 return
             except (redis.RedisError, pickle.PickleError) as e:
                 if attempt == max_retries - 1:
-                    logger.error(f"Failed to upload buffer after {max_retries} attempts: {e}")
+                    logger.error(f"Failed to upload buffer after {max_retries} attempts: {e}", exc_info=True)
                     raise
                 time.sleep(1)
 
     def _aggregate_replay_buffers(self):
         """Aggregate replay buffers from all workers and master"""
-        all_data = []
+        new_data = []
         
         # Add master's local buffer first
-        all_data.extend(list(self.local_buffer))
+        new_data.extend(list(self.local_buffer))
         logger.info(f"Added master's buffer with {len(self.local_buffer)} examples")
         # Clear master's local buffer after using it
         self.local_buffer.clear()
@@ -341,11 +345,15 @@ class DistributedAlphaZero:
             if buffer_data:
                 try:
                     worker_buffer = pickle.loads(buffer_data)
-                    all_data.extend(worker_buffer)
+                    new_data.extend(worker_buffer)
                     logger.info(f"Added worker {worker_rank}'s buffer with {len(worker_buffer)} examples")
                 except (pickle.PickleError, EOFError) as e:
-                    logger.error(f"Error unpickling buffer from worker {worker_rank}: {e}")
+                    logger.error(f"Error unpickling buffer from worker {worker_rank}: {e}", exc_info=True)
                     continue
+        
+        # Combine existing buffer with new data
+        all_data = list(self.trainer.replay_buffer) + new_data
+        logger.info(f"Combined buffer size: {len(all_data)} (existing: {len(self.trainer.replay_buffer)}, new: {len(new_data)})")
         
         # Sample if total data exceeds max buffer size
         if len(all_data) > self.config.max_buffer_size:
@@ -353,18 +361,30 @@ class DistributedAlphaZero:
         
         # Update master's replay buffer
         self.trainer.replay_buffer = deque(all_data, maxlen=self.config.max_buffer_size)
-        logger.info(f"Aggregated buffer size: {len(self.trainer.replay_buffer)} from {len(all_data)} total examples")
+        logger.info(f"Final aggregated buffer size: {len(self.trainer.replay_buffer)}")
 
     def _train_iteration(self):
         """Train on aggregated data"""
         buffer_size = len(self.trainer.replay_buffer)
         if buffer_size >= self.config.min_buffer_size:
             logger.info(f"Starting training with buffer size: {buffer_size}")
-            for step in tqdm(range(self.config.steps_per_iteration), desc="Training steps"):
+            progress_bar = tqdm(range(self.config.steps_per_iteration), desc="Training")
+            for step in progress_bar:
                 batch = random.sample(self.trainer.replay_buffer, self.config.batch_size)
                 loss = self.trainer.train_on_batch(batch)
+                
+                # Handle loss being a tuple or single value
+                if isinstance(loss, tuple):
+                    total_loss = sum(loss)  # Sum all loss components
+                    loss_str = f"Total: {total_loss:.4f} ("
+                    loss_str += ", ".join(f"{l:.4f}" for l in loss)
+                    loss_str += ")"
+                else:
+                    loss_str = f"{loss:.4f}"
+                
                 if step % 100 == 0:  # Log every 100 steps
-                    logger.info(f"Training step {step}/{self.config.steps_per_iteration}, Loss: {loss:.4f}")
+                    progress_bar.set_postfix({"Loss": loss_str})
+                    logger.info(f"Training step {step}/{self.config.steps_per_iteration}, Loss: {loss_str}")
         else:
             logger.info(f"Skipping training - insufficient data in buffer ({buffer_size} < {self.config.min_buffer_size})")
 
@@ -390,7 +410,7 @@ class DistributedAlphaZero:
             time.sleep(3)
             retry_count += 1
         
-        logger.error("Timeout waiting for workers to complete")
+        logger.error("Timeout waiting for workers to complete", exc_info=True)
         raise TimeoutError("Workers did not complete in time")
 
     def _clear_completion_flags(self):
@@ -434,7 +454,7 @@ class DistributedAlphaZero:
                 logger.info(f"Successfully restored full training state from checkpoint")
                 
         except Exception as e:
-            logger.error(f"Error loading checkpoint: {e}")
+            logger.error(f"Error loading checkpoint: {e}", exc_info=True)
             raise
 
     def _run_distributed_evaluation(self):
@@ -444,13 +464,13 @@ class DistributedAlphaZero:
         
         logger.info("Starting distributed evaluation")
         
-        # Signal workers to start evaluation mode
-        self.redis_client.set("evaluation_mode", "1")
-        
-        # Calculate games per worker
-        total_eval_games = self.config.eval_games * 2  # Each matchup played twice with colors reversed
-        games_per_worker = total_eval_games // (self.world_size - 1)  # Exclude master
-        remaining_games = total_eval_games % (self.world_size - 1)
+        # Signal workers to start evaluation mode and set total games needed
+        eval_config = {
+            'mode': 'evaluation',
+            'total_games': self.config.eval_games * 2,  # Each game played twice (switching sides)
+            'games_completed': 0
+        }
+        self.redis_client.set("evaluation_config", json.dumps(eval_config))
         
         wins = 0
         draws = 0
@@ -461,7 +481,7 @@ class DistributedAlphaZero:
             for worker_rank in range(1, self.world_size):
                 eval_key = f"eval_results:{worker_rank}"
                 # Wait with timeout
-                for _ in range(60):  # 60 second timeout
+                for _ in range(360):  # 360 second timeout
                     result = self.redis_client.get(eval_key)
                     if result:
                         worker_results = json.loads(result)
@@ -470,7 +490,7 @@ class DistributedAlphaZero:
                         total_games += worker_results['total']
                         break
                     time.sleep(1)
-                
+            
             if total_games > 0:
                 win_rate = (wins + draws) / total_games
                 logger.info(f"Evaluation complete - Win rate against best model: {win_rate:.2%}")
@@ -484,7 +504,7 @@ class DistributedAlphaZero:
                     
         finally:
             # Clear evaluation mode
-            self.redis_client.delete("evaluation_mode")
+            self.redis_client.delete("evaluation_config")
             # Clear results
             for worker_rank in range(1, self.world_size):
                 self.redis_client.delete(f"eval_results:{worker_rank}")
@@ -512,12 +532,20 @@ class DistributedAlphaZero:
         draws = 0
         total_games = 0
         
-        # Calculate number of games for this worker
-        games_per_worker = (self.config.eval_games * 2) // (self.world_size - 1)
-        if self.rank == self.world_size - 1:  # Last worker gets remaining games
-            games_per_worker += (self.config.eval_games * 2) % (self.world_size - 1)
-        
-        for _ in range(games_per_worker):
+        while True:
+            # Get current evaluation config
+            eval_config_data = self.redis_client.get("evaluation_config")
+            if not eval_config_data:
+                break
+            eval_config = json.loads(eval_config_data)
+            if eval_config['mode'] != 'evaluation':
+                break
+            
+            # Check if we've reached the total games needed
+            current_games = self.redis_client.incr("evaluation_games_completed", 2)
+            if current_games > eval_config['total_games']:
+                break
+            
             # Play one game as red
             result = self.play_evaluation_game(eval_mcts, best_mcts)
             if result == 1:
@@ -571,7 +599,7 @@ def get_redis_client(redis_host, redis_port):
         redis_client.ping()
         return redis_client
     except redis.ConnectionError as e:
-        logger.error(f"Failed to connect to Redis: {e}")
+        logger.error(f"Failed to connect to Redis: {e}", exc_info=True)
         raise
 
 def get_rank_from_redis(redis_client, world_size, clear_rank=False):
@@ -581,6 +609,7 @@ def get_rank_from_redis(redis_client, world_size, clear_rank=False):
     # Clear rank counter if requested
     if clear_rank:
         redis_client.delete(rank_key)
+        redis_client.delete("evaluation_config")
         logger.info("Cleared rank counter in Redis")
     
     try:
@@ -595,7 +624,7 @@ def get_rank_from_redis(redis_client, world_size, clear_rank=False):
             
         return rank
     except redis.RedisError as e:
-        logger.error(f"Failed to get rank from Redis: {e}")
+        logger.error(f"Failed to get rank from Redis: {e}", exc_info=True)
         raise
 
 def launch_distributed_training(
