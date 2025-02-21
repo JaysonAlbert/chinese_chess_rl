@@ -16,7 +16,7 @@ import glob
 import signal
 from xiangqi_rl.agent import XiangqiAgent
 from xiangqi_rl.environment import XiangqiEnv
-from xiangqi_rl.logger import logger
+from xiangqi_rl.logger import logger, set_rank
 from xiangqi_rl.mcts import MCTS
 
 class DistributedAlphaZero:
@@ -47,6 +47,8 @@ class DistributedAlphaZero:
             eval_interval: Override config's eval_interval if provided
         """
         self.rank = rank
+        # Set rank in logger
+        set_rank(rank)
         self.world_size = world_size
         self.is_master = is_master
         self.config = config
@@ -190,7 +192,6 @@ class DistributedAlphaZero:
                 
                 # Replace trainer.evaluate() with distributed evaluation
                 if iteration % self.config.eval_interval == 0:
-                    logger.info("Starting distributed evaluation...")
                     self._run_distributed_evaluation()
                     logger.info("Distributed evaluation complete")
                 
@@ -471,6 +472,8 @@ class DistributedAlphaZero:
             'games_completed': 0
         }
         self.redis_client.set("evaluation_config", json.dumps(eval_config))
+
+        self._broadcast_model()
         
         wins = 0
         draws = 0
