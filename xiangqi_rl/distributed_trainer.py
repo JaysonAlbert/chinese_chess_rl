@@ -85,6 +85,19 @@ class DistributedAlphaZero:
         
         if self.is_master:
             self.start_iteration = 0  # Only master needs to track iteration
+            
+            # First phase: load just the model state if a checkpoint is available
+            if self.config.resume_from and os.path.exists(self.config.resume_from):
+                logger.info(f"Loading model state from {self.config.resume_from}")
+                try:
+                    checkpoint = torch.load(self.config.resume_from, map_location=self.device)
+                    self.model.load_state_dict(checkpoint['model_state_dict'])
+                    self.start_iteration = checkpoint['iteration'] + 1
+                    logger.info(f"Model state loaded, resuming from iteration {self.start_iteration}")
+                except Exception as e:
+                    logger.error(f"Error loading model state: {e}", exc_info=True)
+                    raise
+                
             # Master node maintains the official model and trainer
             self.trainer = AlphaZeroTrainer(
                 self.model,
@@ -93,9 +106,12 @@ class DistributedAlphaZero:
                 disable_progress_bar=False
             )
             
-            # Only master loads checkpoint
-            if self.config.resume_from:
-                self._load_checkpoint()
+            # Second phase: use trainer's load_checkpoint to restore optimizer and replay buffer
+            if self.config.resume_from and os.path.exists(self.config.resume_from):
+                # Override the trainer's built-in checkpoint search
+                self.trainer.load_checkpoint(self.config.resume_from)
+                # Ensure start_iteration is consistent
+                self.trainer.start_iteration = self.start_iteration
         
         # Wrap model with DDP
         if torch.cuda.is_available():
@@ -420,43 +436,6 @@ class DistributedAlphaZero:
             self.redis_client.delete(f"complete:{worker_rank}")
         # Also clear the games counter
         self.redis_client.delete("games_completed")
-
-    def _load_checkpoint(self):
-        """Load checkpoint and restore all saved states"""
-        if not self.config.resume_from or not os.path.exists(self.config.resume_from):
-            return
-
-        logger.info(f"Loading checkpoint from {self.config.resume_from}")
-        try:
-            checkpoint = torch.load(self.config.resume_from, map_location=self.device)
-            
-            # Load model state
-            self.model.load_state_dict(checkpoint['model_state_dict'])
-            
-            # Set starting iteration
-            self.start_iteration = checkpoint['iteration'] + 1
-            logger.info(f"Resuming from iteration {self.start_iteration}")
-            
-            # For master node, restore additional training state
-            if self.is_master:
-                # Load optimizer state
-                self.trainer.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-                
-                # Restore replay buffer if it exists
-                if 'replay_buffer' in checkpoint:
-                    self.trainer.replay_buffer = deque(checkpoint['replay_buffer'], 
-                                                    maxlen=self.config.max_buffer_size)
-                    logger.info(f"Restored replay buffer with {len(self.trainer.replay_buffer)} examples")
-                
-                # Restore global step counter
-                if 'global_step' in checkpoint:
-                    self.trainer.global_step = checkpoint['global_step']
-                    
-                logger.info(f"Successfully restored full training state from checkpoint")
-                
-        except Exception as e:
-            logger.error(f"Error loading checkpoint: {e}", exc_info=True)
-            raise
 
     def _run_distributed_evaluation(self):
         """Run evaluation games distributed across workers"""

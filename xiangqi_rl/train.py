@@ -14,8 +14,6 @@ from collections import deque
 from xiangqi_rl.logger import logger
 import glob
 import re
-import psutil
-import queue
 
 # Set start method to spawn
 if __name__ == '__main__':
