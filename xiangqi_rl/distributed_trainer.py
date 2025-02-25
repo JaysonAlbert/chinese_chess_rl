@@ -6,7 +6,7 @@ import redis
 import pickle
 import random
 from collections import deque
-from xiangqi_rl.train import AlphaZeroTrainer, TrainingConfig
+from xiangqi_rl.train import AlphaZeroTrainer, TrainingConfig, play_evaluation_game
 from xiangqi_rl.model import XiangqiHybridNet
 import json
 from tqdm import tqdm
@@ -465,6 +465,13 @@ class DistributedAlphaZero:
         
         logger.info("Starting distributed evaluation")
         
+        # Load best model state dict
+        best_model_state = torch.load(self.trainer.best_model_path, map_location=self.device)
+        
+        # Serialize model state for Redis
+        best_model_buffer = pickle.dumps(best_model_state)
+        self.redis_client.set("best_model_state", best_model_buffer)
+        
         # Signal workers to start evaluation mode and set total games needed
         eval_config = {
             'mode': 'evaluation',
@@ -506,8 +513,9 @@ class DistributedAlphaZero:
                         self.trainer.best_model.load_state_dict(self.model.module.state_dict())
                     
         finally:
-            # Clear evaluation mode
+            # Clear evaluation mode and model state
             self.redis_client.delete("evaluation_config")
+            self.redis_client.delete("best_model_state")
             # Clear results
             for worker_rank in range(1, self.world_size):
                 self.redis_client.delete(f"eval_results:{worker_rank}")
@@ -516,20 +524,24 @@ class DistributedAlphaZero:
         """Run evaluation games on worker node"""
         logger.info(f"Worker {self.rank} starting evaluation")
         
+        # Get best model state from Redis
+        best_model_buffer = self.redis_client.get("best_model_state")
+        if not best_model_buffer:
+            logger.error("Could not get best model state from Redis")
+            return
+        
+        try:
+            best_model_state = pickle.loads(best_model_buffer)
+        except Exception as e:
+            logger.error(f"Failed to deserialize best model state: {e}")
+            return
+        
         # Create evaluation MCTS with appropriate device
-        eval_mcts = MCTS(self.model.module, num_simulations=400,
-                         max_moves=self.config.max_moves,
-                         disable_progress_bar=True)
-                         
+        eval_model = self.model.module  # Using the current model
+                     
         # Load best model for comparison
         best_model = XiangqiHybridNet().to(self.device)
-        best_model_state = torch.load(self.trainer.best_model_path, 
-                                     map_location=self.device)
         best_model.load_state_dict(best_model_state)
-        
-        best_mcts = MCTS(best_model, num_simulations=400,
-                         max_moves=self.config.max_moves, 
-                         disable_progress_bar=True)
         
         wins = 0
         draws = 0
@@ -550,7 +562,9 @@ class DistributedAlphaZero:
                 break
             
             # Play one game as red
-            result = self.play_evaluation_game(eval_mcts, best_mcts)
+            result = play_evaluation_game(eval_model, best_model, 
+                                         max_moves=self.config.max_moves, 
+                                         device=self.device)
             if result == 1:
                 wins += 1
             elif result == 0:
@@ -558,7 +572,9 @@ class DistributedAlphaZero:
             total_games += 1
             
             # Play one game as black
-            result = self.play_evaluation_game(best_mcts, eval_mcts)
+            result = play_evaluation_game(best_model, eval_model, 
+                                         max_moves=self.config.max_moves,
+                                         device=self.device)
             if result == -1:  # Win for current model as black
                 wins += 1
             elif result == 0:
